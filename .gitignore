@@ -1,0 +1,72 @@
+# ============================================================
+# AI / editor assistant directories
+# ============================================================
+.claude/
+.windsurf-rules/
+
+# ============================================================
+# Environment & secrets
+# ============================================================
+.env
+.env.*
+!.env.example
+*.env.local
+*.env.development
+*.env.production
+*.env.staging
+
+# ============================================================
+# Credentials / keys / certificates
+# ============================================================
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+*.mobileprovision
+*.crt
+*.cer
+*.pfx
+secrets.*
+credentials.*
+
+# ============================================================
+# Frontend (React Native / Expo)
+# ============================================================
+frontend/node_modules/
+frontend/.expo/
+frontend/dist/
+frontend/web-build/
+frontend/.cache/
+
+# ============================================================
+# Backend (Python / FastAPI)
+# ============================================================
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.egg-info/
+backend/data.db
+backend/app.db
+
+# ============================================================
+# General
+# ============================================================
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.orig.*
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
