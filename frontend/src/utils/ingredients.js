@@ -62,6 +62,32 @@ export const createManualIngredient = (name) => ({
 });
 
 /**
+ * Deduplicates ingredients by name (case-insensitive).
+ * When duplicates are found, keeps the entry with the highest confidence
+ * and averages the estimatedQuantity across all duplicates.
+ * @param {Array} ingredients - Ingredient list (may contain duplicates).
+ * @returns {Array} Deduplicated ingredient list.
+ */
+export const deduplicateIngredients = (ingredients) => {
+  if (!Array.isArray(ingredients)) return [];
+  const seen = {};
+  const quantities = {};
+  for (const item of ingredients) {
+    const key = (item.name || '').toLowerCase().trim();
+    if (!seen[key] || item.confidence > seen[key].confidence) {
+      seen[key] = item;
+    }
+    if (!quantities[key]) quantities[key] = [];
+    quantities[key].push(item.estimatedQuantity ?? 1);
+  }
+  return Object.keys(seen).map((key) => {
+    const qty = quantities[key];
+    const avg = qty.reduce((a, b) => a + b, 0) / qty.length;
+    return { ...seen[key], estimatedQuantity: Math.round(avg * 100) / 100 };
+  });
+};
+
+/**
  * Sorts ingredients by urgency (most urgent first), then by category.
  * @param {Array} ingredients - Ingredient list.
  * @returns {Array} Sorted copy of the list.

@@ -10,6 +10,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSession } from '../../src/context/SessionContext';
+import { useAuth } from '../../src/context/AuthContext';
 import useVlm from '../../src/hooks/useVlm';
 import Button from '../../src/components/common/Button';
 import Tag from '../../src/components/common/Tag';
@@ -29,7 +30,8 @@ const TIME_OPTIONS = [15, 30, 45, 60, 90];
 export default function SessionSetupScreen() {
   const router = useRouter();
   const { session, updateSession } = useSession();
-  const vlm = useVlm();
+  const { ensureRegistered } = useAuth();
+  const vlm = useVlm({ ensureRegistered });
   const [showAdvancedTime, setShowAdvancedTime] = useState(false);
   const [manualIngredient, setManualIngredient] = useState('');
 
@@ -74,7 +76,7 @@ export default function SessionSetupScreen() {
       availableIngredients: confirmedIngredients,
       sessionReady: true,
     });
-    router.replace('/(tabs)/discover');
+    router.replace('/session/generating');
   };
 
   return (

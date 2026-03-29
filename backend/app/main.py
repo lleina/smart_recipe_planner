@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from app.config import CORS_ORIGINS
 from app.database import init_db
 from app.routes import (
@@ -48,7 +49,11 @@ app = FastAPI(
 async def global_exception_handler(request: Request, exc: Exception):
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url.path, "".join(tb))
-    return JSONResponse(status_code=500, content={"error": str(exc)})
+    return JSONResponse(status_code=500, content={"error": {
+        "code": "ERR_INTERNAL",
+        "message": "An unexpected error occurred. Please try again.",
+        "retryable": True,
+    }})
 
 
 @app.middleware("http")
@@ -83,4 +88,58 @@ app.include_router(recipe_routes.router)
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok"}
+    """NFR-OBS-02: Health check with dependency status."""
+    from app.config import VLM_BASE_URL, LLM_BASE_URL, SPOONACULAR_API_KEY
+    from app.database import engine as db_engine
+    import httpx
+
+    deps = {}
+
+    # DB check
+    try:
+        async with db_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        deps["db"] = "ok"
+    except Exception:
+        deps["db"] = "down"
+
+    # VLM check
+    if VLM_BASE_URL:
+        try:
+            ollama_root = VLM_BASE_URL.rstrip("/")
+            if ollama_root.endswith("/v1"):
+                ollama_root = ollama_root[:-3]
+            async with httpx.AsyncClient(timeout=3) as client:
+                r = await client.get(f"{ollama_root}/api/tags")
+                deps["vlm"] = "ok" if r.status_code == 200 else "degraded"
+        except Exception:
+            deps["vlm"] = "down"
+    else:
+        deps["vlm"] = "mock"
+
+    # LLM check
+    if LLM_BASE_URL:
+        try:
+            ollama_root = LLM_BASE_URL.rstrip("/")
+            if ollama_root.endswith("/v1"):
+                ollama_root = ollama_root[:-3]
+            async with httpx.AsyncClient(timeout=3) as client:
+                r = await client.get(f"{ollama_root}/api/tags")
+                deps["llm"] = "ok" if r.status_code == 200 else "degraded"
+        except Exception:
+            deps["llm"] = "down"
+    else:
+        deps["llm"] = "mock"
+
+    # Spoonacular check
+    deps["spoonacular"] = "ok" if SPOONACULAR_API_KEY else "mock"
+
+    all_vals = list(deps.values())
+    if all(v in ("ok", "mock") for v in all_vals):
+        overall = "ok"
+    elif "down" in all_vals:
+        overall = "degraded"
+    else:
+        overall = "degraded"
+
+    return {"status": overall, "dependencies": deps}

@@ -63,7 +63,7 @@ def main():
     print(f"  Sending POST to {BASE}/api/recommend ...")
     print(f"  Payload: {json.dumps(payload, indent=2)[:300]}...")
     start = time.time()
-    rec = requests.post(f"{BASE}/api/recommend", json=payload, headers=headers, timeout=300)
+    rec = requests.post(f"{BASE}/api/recommend", json=payload, headers=headers, timeout=660)
     elapsed = time.time() - start
     print(f"  Status: {rec.status_code} (took {elapsed:.1f}s)")
     if rec.status_code != 200:

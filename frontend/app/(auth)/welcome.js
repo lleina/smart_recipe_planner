@@ -1,20 +1,23 @@
 /**
  * Welcome/splash screen - entry point for unauthenticated users.
+ * Offline-first: creates a local identity with no server call.
+ * Backend registration happens lazily when server access is needed.
  */
 
-import { View, Text, Pressable } from 'react-native';
+import { useState } from 'react';
+import { View, Text, Pressable, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/context/AuthContext';
 
 export default function WelcomeScreen() {
   const router = useRouter();
-  const { login } = useAuth();
+  const { localSetup } = useAuth();
+  const [loading, setLoading] = useState(false);
 
   const handleGetStarted = async () => {
-    // TODO: Replace with real auth flow when backend is ready
-    const mockUserId = `user_${Date.now()}`;
-    await login('mock_access_token', 'mock_refresh_token', mockUserId);
+    setLoading(true);
+    await localSetup();
     router.replace('/(auth)/onboarding');
   };
 
@@ -33,13 +36,19 @@ export default function WelcomeScreen() {
         <View className="w-full gap-4">
           <Pressable
             onPress={handleGetStarted}
+            disabled={loading}
             className="bg-primary py-4 rounded-xl items-center active:bg-primary-dark"
           >
-            <Text className="text-white text-lg font-semibold">Get Started</Text>
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text className="text-white text-lg font-semibold">Get Started</Text>
+            )}
           </Pressable>
 
           <Pressable
             onPress={handleGetStarted}
+            disabled={loading}
             className="py-4 rounded-xl items-center border border-border active:bg-gray-50"
           >
             <Text className="text-text-primary text-lg font-semibold">I Have an Account</Text>

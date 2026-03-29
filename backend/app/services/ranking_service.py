@@ -24,20 +24,28 @@ import math
 import re
 from typing import Optional
 from app.config import LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY, RANKING_MODE
-from app.services.inference_client import get_client
+from app.services.inference_client import ollama_chat
 from app.schemas import SessionContextRequest, IngredientItem
 
 logger = logging.getLogger("app.ranking")
 
 
 def _extract_json(raw: str) -> str:
-    """Strip <think> blocks, markdown fences, and other wrapper text to get raw JSON."""
+    """Strip <think> blocks, markdown fences, and other wrapper text to get raw JSON.
+
+    Also attempts to recover truncated JSON arrays by closing open brackets.
+    """
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
     raw = raw.strip()
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     match = re.search(r"(\[.*\]|\{.*\})", raw, re.DOTALL)
     if match:
         return match.group(1)
+    # Try to recover a truncated JSON array
+    if raw.startswith("["):
+        last_brace = raw.rfind("}")
+        if last_brace != -1:
+            return raw[:last_brace + 1].rstrip().rstrip(",") + "\n]"
     return raw
 
 # Number of rule-scored candidates passed to the LLM in hybrid mode
@@ -207,8 +215,6 @@ async def _llm_rerank(
         return candidates
 
     try:
-        client = get_client(base_url=LLM_BASE_URL, api_key=LLM_API_KEY or "local")
-
         candidate_summary = [
             {
                 "id": r["id"],
@@ -230,20 +236,23 @@ async def _llm_rerank(
             f"Return a JSON array of recipe IDs in your preferred order."
         )
 
-        response = await client.chat.completions.create(
+        raw = await ollama_chat(
+            base_url=LLM_BASE_URL,
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": _RERANK_SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            max_tokens=8192,
+            max_tokens=1024,
             temperature=0.2,
             timeout=LLM_TIMEOUT_SECONDS,
+            think=False,
         )
 
-        raw = response.choices[0].message.content or ""
         logger.debug("Re-ranker raw response (first 500 chars): %s", raw[:500])
         clean = _extract_json(raw)
+        if not clean.strip():
+            raise ValueError("Re-ranker returned empty content after extraction")
         ranked_ids: list[str] = json.loads(clean)
 
         # Reconstruct ordered list; append any IDs the LLM omitted at the end

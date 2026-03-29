@@ -9,6 +9,7 @@ import {
   scaleQuantity,
   createManualIngredient,
   sortByUrgency,
+  deduplicateIngredients,
 } from '../../src/utils/ingredients';
 
 const mockIngredients = [
@@ -116,5 +117,75 @@ describe('sortByUrgency', () => {
 
   test('handles invalid input', () => {
     expect(sortByUrgency(null)).toEqual([]);
+  });
+});
+
+describe('deduplicateIngredients', () => {
+  test('returns list unchanged when all names are unique', () => {
+    const input = [
+      { name: 'honey', confidence: 0.9, estimatedQuantity: 1 },
+      { name: 'lemon', confidence: 0.85, estimatedQuantity: 2 },
+    ];
+    const result = deduplicateIngredients(input);
+    expect(result).toHaveLength(2);
+    expect(result.map((i) => i.name)).toContain('honey');
+    expect(result.map((i) => i.name)).toContain('lemon');
+  });
+
+  test('deduplicates exact duplicate names, keeping highest confidence', () => {
+    const input = [
+      { name: 'honey', confidence: 0.7, estimatedQuantity: 1 },
+      { name: 'honey', confidence: 0.95, estimatedQuantity: 2 },
+    ];
+    const result = deduplicateIngredients(input);
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('honey');
+    expect(result[0].confidence).toBe(0.95);
+  });
+
+  test('averages estimatedQuantity across duplicates', () => {
+    const input = [
+      { name: 'honey', confidence: 0.7, estimatedQuantity: 1 },
+      { name: 'honey', confidence: 0.95, estimatedQuantity: 3 },
+    ];
+    const result = deduplicateIngredients(input);
+    expect(result[0].estimatedQuantity).toBe(2); // (1 + 3) / 2
+  });
+
+  test('deduplicates case-insensitively (model returning Honey and honey)', () => {
+    const input = [
+      { name: 'Honey', confidence: 0.8, estimatedQuantity: 1 },
+      { name: 'honey', confidence: 0.9, estimatedQuantity: 1 },
+    ];
+    const result = deduplicateIngredients(input);
+    expect(result).toHaveLength(1);
+    expect(result[0].confidence).toBe(0.9);
+  });
+
+  test('handles three duplicates: keeps max confidence, averages quantities', () => {
+    const input = [
+      { name: 'garlic', confidence: 0.6, estimatedQuantity: 3 },
+      { name: 'garlic', confidence: 0.9, estimatedQuantity: 6 },
+      { name: 'garlic', confidence: 0.75, estimatedQuantity: 3 },
+    ];
+    const result = deduplicateIngredients(input);
+    expect(result).toHaveLength(1);
+    expect(result[0].confidence).toBe(0.9);
+    expect(result[0].estimatedQuantity).toBe(4); // (3 + 6 + 3) / 3
+  });
+
+  test('preserves all other fields from the highest-confidence entry', () => {
+    const input = [
+      { name: 'honey', confidence: 0.7, estimatedQuantity: 1, category: 'shelf-stable', unit: 'bottles' },
+      { name: 'honey', confidence: 0.95, estimatedQuantity: 2, category: 'shelf-stable', unit: 'cups' },
+    ];
+    const result = deduplicateIngredients(input);
+    expect(result[0].unit).toBe('cups');
+    expect(result[0].category).toBe('shelf-stable');
+  });
+
+  test('returns empty array for invalid input', () => {
+    expect(deduplicateIngredients(null)).toEqual([]);
+    expect(deduplicateIngredients('not-array')).toEqual([]);
   });
 });

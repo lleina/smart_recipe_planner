@@ -4,6 +4,7 @@
  * Supports skeleton loading state per BR-DSC-07.
  */
 
+import { memo } from 'react';
 import { View, Text, Pressable, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { formatMinutes } from '../../utils/time';
@@ -30,7 +31,7 @@ const DIFFICULTY_LABELS = {
  * @param {boolean} [props.loading] - Show skeleton if true.
  * @param {string} [props.badge] - Optional badge label (e.g., "Quick", "Surprise!").
  */
-export default function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }) {
+function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }) {
   if (loading) {
     return <RecipeCardSkeleton />;
   }
@@ -136,6 +137,8 @@ export default function RecipeCard({ recipe, isSaved, onPress, onSave, loading =
   );
 }
 
+const MemoRecipeCardSkeleton = memo(RecipeCardSkeleton);
+
 function RecipeCardSkeleton() {
   return (
     <View className="bg-surface rounded-2xl overflow-hidden mb-4">
@@ -153,3 +156,18 @@ function RecipeCardSkeleton() {
     </View>
   );
 }
+
+// Custom comparator: only re-render when visible data or saved state changes.
+// Ignores new callback references (onPress/onSave) since the logic is identical.
+export default memo(RecipeCard, (prev, next) => {
+  return (
+    prev.loading === next.loading &&
+    prev.isSaved === next.isSaved &&
+    prev.badge === next.badge &&
+    prev.recipe?.id === next.recipe?.id &&
+    prev.recipe?.title === next.recipe?.title &&
+    prev.recipe?.image === next.recipe?.image &&
+    prev.recipe?.totalTime === next.recipe?.totalTime &&
+    prev.recipe?.rating === next.recipe?.rating
+  );
+});

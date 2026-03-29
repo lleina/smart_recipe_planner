@@ -75,6 +75,7 @@ class IngredientItem(BaseModel):
 
 
 class VlmResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=_camel_case_alias, populate_by_name=True, serialize_by_alias=True)
     ingredients: list[IngredientItem]
 
 
@@ -210,5 +211,8 @@ class EventCreate(BaseModel):
 # --- Generic ---
 
 class ErrorResponse(BaseModel):
-    error: str
-    fallback: bool = False
+    """NFR-REL-04 standardized error format."""
+    model_config = ConfigDict(alias_generator=_camel_case_alias, populate_by_name=True, serialize_by_alias=True)
+    code: str
+    message: str
+    retryable: bool = False

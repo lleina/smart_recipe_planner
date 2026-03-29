@@ -4,7 +4,7 @@
  */
 
 export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
-export const API_TIMEOUT_MS = 30000;
+export const API_TIMEOUT_MS = 660000;  // 11 min — allows 9B model to generate 40 recipes
 export const VLM_TIMEOUT_MS = 120000;
 
 export const IMAGE_MAX_SIZE_BYTES = 5 * 1024 * 1024;

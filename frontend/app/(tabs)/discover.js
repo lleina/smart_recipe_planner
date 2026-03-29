@@ -3,15 +3,15 @@
  * Shows recipe cards, handles load more, and tracks session state.
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { View, Text, ScrollView, Pressable, Modal, FlatList } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, Pressable, Modal, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useSession } from '../../src/context/SessionContext';
 import { useAuth } from '../../src/context/AuthContext';
-import useRecipes from '../../src/hooks/useRecipes';
+import { useRecipeContext } from '../../src/context/RecipeContext';
 import useSavedRecipes from '../../src/hooks/useSavedRecipes';
 import RecipeCard from '../../src/components/common/RecipeCard';
 import { RECIPE_BATCH_SIZE } from '../../src/constants/config';
@@ -23,35 +23,23 @@ export default function DiscoverScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const { session, updateSession, resetSession, getSessionContext } = useSession();
-  const { recipes, loading, error, poolInfo, startPipeline, loadNextBatch, rerank } = useRecipes();
+  const { recipes, loading, error, poolInfo, startPipeline, loadNextBatch, rerank } = useRecipeContext();
   const { save, remove, isSaved, savedRecipes } = useSavedRecipes();
   const [refreshCount, setRefreshCount] = useState(0);
   const [showFatiguePrompt, setShowFatiguePrompt] = useState(false);
   const [showSavedPanel, setShowSavedPanel] = useState(false);
   const hasStartedRef = useRef(false);
 
-  useEffect(() => {
-    console.log('[Discover] Session state:', {
-      sessionReady: session.sessionReady,
-      hasStarted: hasStartedRef.current,
-      loading,
-      userId: user?.id,
-    });
-    if (session.sessionReady && !hasStartedRef.current && !loading) {
-      console.log('[Discover] Starting pipeline with context:', getSessionContext());
-      hasStartedRef.current = true;
-      startPipeline(getSessionContext());
-      updateSession({ sessionReady: false });
-    }
-  }, [session.sessionReady, loading, startPipeline, getSessionContext, updateSession]);
+  // Pipeline is now triggered by session/generating screen.
+  // This screen only displays recipes already loaded by useRecipes.
 
-  const handleStartSession = () => {
+  const handleStartSession = useCallback(() => {
     resetSession();
     hasStartedRef.current = false;
     router.push('/session/setup');
-  };
+  }, [resetSession, router]);
 
-  const handleLoadMore = async () => {
+  const handleLoadMore = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setRefreshCount((c) => {
       const next = c + 1;
@@ -61,28 +49,110 @@ export default function DiscoverScreen() {
       return next;
     });
     await loadNextBatch();
-  };
+  }, [loadNextBatch, recipes.length]);
 
-  const handleSave = async (recipe) => {
+  const handleSave = useCallback(async (recipe) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const saved = isSaved(recipe.id);
-    if (saved) {
+    if (isSaved(recipe.id)) {
       const entry = savedRecipes.find((s) => s.recipeId === recipe.id);
       if (entry) remove(entry.id);
     } else {
       await save(recipe.id, session.sessionPoolId);
-      await rerank(recipe.id, 'saved');
+      rerank(recipe.id, 'saved').catch(() => {});
     }
-  };
+  }, [isSaved, savedRecipes, save, remove, session.sessionPoolId, rerank]);
 
-  const getBadge = (recipe, index) => {
+  const handlePress = useCallback((recipe) => {
+    router.push('/recipe/' + recipe.id);
+  }, [router]);
+
+  const getBadge = useCallback((recipe, index) => {
     const totalShown = (poolInfo.shownCount - recipes.length) + index;
     if (totalShown > 0 && totalShown % SURPRISE_INTERVAL === 0) return 'Try Something New';
     if (recipe.totalTime != null && recipe.totalTime <= 20) return 'Quick';
     return null;
-  };
+  }, [poolInfo.shownCount, recipes.length]);
 
   const hasActiveSession = session.sessionPoolId != null || recipes.length > 0 || loading;
+
+  // Build the list data: skeletons while loading with no recipes, else actual recipes
+  const listData = useMemo(() => {
+    if (loading && recipes.length === 0) {
+      return Array.from({ length: RECIPE_BATCH_SIZE }, (_, i) => ({ id: `sk-${i}`, _skeleton: true }));
+    }
+    return recipes;
+  }, [loading, recipes]);
+
+  const renderItem = useCallback(({ item, index }) => {
+    if (item._skeleton) return <RecipeCard loading />;
+    return (
+      <RecipeCard
+        recipe={item}
+        isSaved={isSaved(item.id)}
+        badge={getBadge(item, index)}
+        onPress={() => handlePress(item)}
+        onSave={() => handleSave(item)}
+      />
+    );
+  }, [isSaved, getBadge, handlePress, handleSave]);
+
+  const ListHeader = useMemo(() => (
+    <>
+      {error ? (
+        <View className="mb-2 px-0 py-3 bg-red-50 border border-red-200 rounded-xl flex-row items-center gap-2 px-4">
+          <Ionicons name="warning-outline" size={16} color="#DC2626" />
+          <Text className="text-sm text-red-600 flex-1">{error}</Text>
+        </View>
+      ) : null}
+      {session.sessionPoolId ? (
+        <View className="flex-row items-center gap-2 mb-4 py-2 px-3 bg-blue-50 rounded-xl">
+          <Ionicons name="restaurant-outline" size={14} color="#2563EB" />
+          <Text className="text-xs font-medium text-primary capitalize">
+            {session.mealType} · {session.servingCount} serving{session.servingCount !== 1 ? 's' : ''}
+            {session.occasion ? ' · ' + session.occasion : ''}
+          </Text>
+        </View>
+      ) : null}
+      {showFatiguePrompt ? (
+        <View className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
+          <Text className="text-sm font-semibold text-amber-800 mb-1">Having trouble deciding?</Text>
+          <Text className="text-sm text-amber-700 mb-3">Let us help you narrow it down.</Text>
+          <Pressable
+            onPress={() => { setShowFatiguePrompt(false); handleStartSession(); }}
+            className="bg-amber-600 px-4 py-2 rounded-lg self-start"
+          >
+            <Text className="text-white text-sm font-semibold">Refine Preferences</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </>
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [error, session.sessionPoolId, session.mealType, session.servingCount, session.occasion, showFatiguePrompt, handleStartSession]);
+
+  const ListFooter = useMemo(() => (
+    <>
+      {loading && recipes.length > 0
+        ? Array.from({ length: RECIPE_BATCH_SIZE }).map((_, i) => (
+            <RecipeCard key={'ld-' + i} loading />
+          ))
+        : null}
+      {!loading && recipes.length > 0 ? (
+        <Pressable
+          onPress={handleLoadMore}
+          className="py-4 rounded-xl border border-border items-center flex-row justify-center gap-2 active:bg-gray-50"
+        >
+          <Ionicons name="chevron-down" size={18} color="#64748B" />
+          <Text className="text-sm font-semibold text-text-secondary">Load More Recipes</Text>
+        </Pressable>
+      ) : null}
+      {poolInfo.poolSize > 0 ? (
+        <Text className="text-xs text-text-muted text-center mt-3 pb-2">
+          {poolInfo.shownCount} of {poolInfo.poolSize} recipes shown
+        </Text>
+      ) : null}
+    </>
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [loading, recipes.length, handleLoadMore, poolInfo]);
 
   return (
     <SafeAreaView className="flex-1 bg-background">
@@ -109,81 +179,22 @@ export default function DiscoverScreen() {
         </View>
       </View>
 
-      {error ? (
-        <View className="mx-6 mb-2 px-4 py-3 bg-red-50 border border-red-200 rounded-xl flex-row items-center gap-2">
-          <Ionicons name="warning-outline" size={16} color="#DC2626" />
-          <Text className="text-sm text-red-600 flex-1">{error}</Text>
-        </View>
-      ) : null}
-
       {!hasActiveSession && !loading ? (
         <EmptyState onStart={handleStartSession} />
       ) : (
-        <ScrollView
-          className="flex-1 px-6"
+        <FlatList
+          data={listData}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          ListHeaderComponent={ListHeader}
+          ListFooterComponent={ListFooter}
+          contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 24 }}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingBottom: 24 }}
-        >
-          {session.sessionPoolId ? (
-            <View className="flex-row items-center gap-2 mb-4 py-2 px-3 bg-blue-50 rounded-xl">
-              <Ionicons name="restaurant-outline" size={14} color="#2563EB" />
-              <Text className="text-xs font-medium text-primary capitalize">
-                {session.mealType} · {session.servingCount} serving{session.servingCount !== 1 ? 's' : ''}
-                {session.occasion ? ' · ' + session.occasion : ''}
-              </Text>
-            </View>
-          ) : null}
-
-          {showFatiguePrompt ? (
-            <View className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
-              <Text className="text-sm font-semibold text-amber-800 mb-1">Having trouble deciding?</Text>
-              <Text className="text-sm text-amber-700 mb-3">Let us help you narrow it down.</Text>
-              <Pressable
-                onPress={() => { setShowFatiguePrompt(false); handleStartSession(); }}
-                className="bg-amber-600 px-4 py-2 rounded-lg self-start"
-              >
-                <Text className="text-white text-sm font-semibold">Refine Preferences</Text>
-              </Pressable>
-            </View>
-          ) : null}
-
-          {loading && recipes.length === 0
-            ? Array.from({ length: RECIPE_BATCH_SIZE }).map((_, i) => (
-                <RecipeCard key={'sk-' + i} loading />
-              ))
-            : recipes.map((recipe, index) => (
-                <RecipeCard
-                  key={recipe.id}
-                  recipe={recipe}
-                  isSaved={isSaved(recipe.id)}
-                  badge={getBadge(recipe, index)}
-                  onPress={() => router.push('/recipe/' + recipe.id)}
-                  onSave={() => handleSave(recipe)}
-                />
-              ))}
-
-          {loading && recipes.length > 0
-            ? Array.from({ length: RECIPE_BATCH_SIZE }).map((_, i) => (
-                <RecipeCard key={'ld-' + i} loading />
-              ))
-            : null}
-
-          {!loading && recipes.length > 0 ? (
-            <Pressable
-              onPress={handleLoadMore}
-              className="py-4 rounded-xl border border-border items-center flex-row justify-center gap-2 active:bg-gray-50"
-            >
-              <Ionicons name="chevron-down" size={18} color="#64748B" />
-              <Text className="text-sm font-semibold text-text-secondary">Load More Recipes</Text>
-            </Pressable>
-          ) : null}
-
-          {poolInfo.poolSize > 0 ? (
-            <Text className="text-xs text-text-muted text-center mt-3">
-              {poolInfo.shownCount} of {poolInfo.poolSize} recipes shown
-            </Text>
-          ) : null}
-        </ScrollView>
+          removeClippedSubviews
+          initialNumToRender={RECIPE_BATCH_SIZE}
+          maxToRenderPerBatch={RECIPE_BATCH_SIZE}
+          windowSize={5}
+        />
       )}
 
       <SavedPanel

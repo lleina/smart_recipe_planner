@@ -6,13 +6,13 @@
 import { useState, useCallback, useEffect } from 'react';
 import * as ImagePicker from 'expo-image-picker';
 import { identifyIngredients, setVlmAuthTokenGetter } from '../services/vlmService';
-import { filterByConfidence, shouldAutoConfirm, sortByUrgency } from '../utils/ingredients';
+import { filterByConfidence, shouldAutoConfirm, sortByUrgency, deduplicateIngredients } from '../utils/ingredients';
 import { validateImageFile } from '../utils/validation';
 import { compressImage } from '../utils/imageCompression';
 import { IMAGE_COMPRESSION_QUALITY } from '../constants/config';
 import { getAccessToken } from '../services/api';
 
-export default function useVlm() {
+export default function useVlm({ ensureRegistered } = {}) {
   const [images, setImages] = useState([]);
   const [ingredients, setIngredients] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -90,9 +90,12 @@ export default function useVlm() {
     setLoading(true);
     setError(null);
     try {
+      // Lazy-register with backend if not yet authenticated
+      if (ensureRegistered) await ensureRegistered();
       const response = await identifyIngredients(images);
       const filtered = filterByConfidence(response.ingredients);
-      const withConfirmState = filtered.map((ing) => ({
+      const deduplicated = deduplicateIngredients(filtered);
+      const withConfirmState = deduplicated.map((ing) => ({
         ...ing,
         confirmed: shouldAutoConfirm(ing),
       }));

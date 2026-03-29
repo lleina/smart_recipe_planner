@@ -41,24 +41,49 @@ export function SessionProvider({ children }) {
     }));
   }, []);
 
+  const batchAddShownRecipeIds = useCallback((ids) => {
+    if (!ids || ids.length === 0) return;
+    setSession((prev) => ({
+      ...prev,
+      shownRecipeIds: [...prev.shownRecipeIds, ...ids],
+    }));
+  }, []);
+
   const resetSession = useCallback(() => {
     setSession(createInitialSession());
   }, []);
 
   /** Returns only the context fields needed for the pipeline request. */
   const getSessionContext = useCallback(() => {
-    const { sessionPoolId, shownRecipeIds, sessionReady, ...context } = session;
-    return context;
-  }, [session]);
+    return {
+      mealType: session.mealType,
+      servingCount: session.servingCount,
+      availableTimeMinutes: session.availableTimeMinutes,
+      availablePrepTimeMinutes: session.availablePrepTimeMinutes,
+      availableCookTimeMinutes: session.availableCookTimeMinutes,
+      occasion: session.occasion,
+      availableIngredients: session.availableIngredients,
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    session.mealType,
+    session.servingCount,
+    session.availableTimeMinutes,
+    session.availablePrepTimeMinutes,
+    session.availableCookTimeMinutes,
+    session.occasion,
+    session.availableIngredients,
+  ]);
 
   const value = useMemo(() => ({
     session,
     updateSession,
     setIngredients,
     addShownRecipeId,
+    batchAddShownRecipeIds,
     resetSession,
     getSessionContext,
-  }), [session, updateSession, setIngredients, addShownRecipeId, resetSession, getSessionContext]);
+  }), [session, updateSession, setIngredients, addShownRecipeId, batchAddShownRecipeIds, resetSession, getSessionContext]);
 
   return (
     <SessionContext.Provider value={value}>

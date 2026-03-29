@@ -4,7 +4,8 @@
  */
 
 import { useState } from 'react';
-import { View, Text, ScrollView, Pressable, Alert } from 'react-native';
+import { View, Text, ScrollView, Pressable, Alert, ActivityIndicator } from 'react-native';
+import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
@@ -15,7 +16,9 @@ import { useSession } from '../../src/context/SessionContext';
 export default function ProfileScreen() {
   const { user, logout } = useAuth();
   const { resetSession } = useSession();
+  const router = useRouter();
   const [showDevMode, setShowDevMode] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const menuItems = [
     { icon: 'heart-outline', label: 'Cuisine Preferences', route: null },
@@ -106,15 +109,22 @@ export default function ProfileScreen() {
                         text: 'Clear All',
                         style: 'destructive',
                         onPress: async () => {
+                          setClearing(true);
                           try {
-                            await SecureStore.deleteItemAsync('access_token');
-                            await SecureStore.deleteItemAsync('refresh_token');
-                            await SecureStore.deleteItemAsync('user_id');
+                            // Clear AsyncStorage keys individually (iOS blocks .clear())
+                            const allKeys = await AsyncStorage.getAllKeys();
+                            if (allKeys.length > 0) {
+                              await AsyncStorage.multiRemove(allKeys);
+                            }
+                            // Clear SecureStore + onboarding flag
                             await SecureStore.deleteItemAsync('onboarded');
-                            await AsyncStorage.clear();
                             resetSession();
-                            Alert.alert('Success', 'All data cleared. Please restart the app.');
+                            // logout() clears tokens + resets auth state
+                            await logout();
+                            // Navigate to welcome screen immediately
+                            router.replace('/(auth)/welcome');
                           } catch (error) {
+                            setClearing(false);
                             Alert.alert('Error', 'Failed to clear data: ' + error.message);
                           }
                         },
@@ -122,9 +132,14 @@ export default function ProfileScreen() {
                     ]
                   );
                 }}
-                className="bg-red-600 py-3 rounded-xl items-center"
+                disabled={clearing}
+                className={`py-3 rounded-xl items-center ${clearing ? 'bg-red-400' : 'bg-red-600'}`}
               >
-                <Text className="text-white text-sm font-semibold">Clear All App Data</Text>
+                {clearing ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text className="text-white text-sm font-semibold">Clear All App Data</Text>
+                )}
               </Pressable>
             </View>
           )}

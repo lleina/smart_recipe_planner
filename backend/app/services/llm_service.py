@@ -11,14 +11,17 @@ import json
 import logging
 import re
 from app.config import LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY
-from app.services.inference_client import get_client
+from app.services.inference_client import ollama_chat
 from app.schemas import SessionContextRequest, IngredientItem
 
 logger = logging.getLogger("app.llm")
 
 
 def _extract_json(raw: str) -> str:
-    """Strip <think> blocks, markdown fences, and other wrapper text to get raw JSON."""
+    """Strip <think> blocks, markdown fences, and other wrapper text to get raw JSON.
+
+    Also attempts to recover truncated JSON arrays by closing open brackets.
+    """
     # Remove <think>...</think> blocks (qwen3 reasoning traces)
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
     raw = raw.strip()
@@ -28,9 +31,23 @@ def _extract_json(raw: str) -> str:
     match = re.search(r"(\[.*\]|\{.*\})", raw, re.DOTALL)
     if match:
         return match.group(1)
+    # Try to recover a truncated JSON array (starts with [ but never closes)
+    if raw.startswith("["):
+        return _fix_truncated_json_array(raw)
     return raw
 
-_IDEATION_COUNT = 10
+
+def _fix_truncated_json_array(raw: str) -> str:
+    """Attempt to recover a truncated JSON array by finding the last complete object."""
+    # Find the last complete JSON object (ends with })
+    last_brace = raw.rfind("}")
+    if last_brace == -1:
+        return raw
+    # Truncate after the last complete object and close the array
+    truncated = raw[:last_brace + 1].rstrip().rstrip(",") + "\n]"
+    return truncated
+
+_IDEATION_COUNT = 40
 
 _SYSTEM_PROMPT = (
     "You are a recipe ideation assistant. "
@@ -126,12 +143,12 @@ async def _call_llm(
     health_goal: str,
     history_titles: list[str],
 ) -> list[dict]:
-    client = get_client(base_url=LLM_BASE_URL, api_key=LLM_API_KEY or "local")
     user_prompt = _build_user_prompt(
         context, dietary_restrictions, cuisine_preferences, health_goal, history_titles
     )
 
-    response = await client.chat.completions.create(
+    raw_text = await ollama_chat(
+        base_url=LLM_BASE_URL,
         model=LLM_MODEL,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -140,11 +157,13 @@ async def _call_llm(
         max_tokens=16384,
         temperature=0.7,
         timeout=LLM_TIMEOUT_SECONDS,
+        think=False,
     )
 
-    raw_text = response.choices[0].message.content or ""
     logger.debug("LLM raw response (first 500 chars): %s", raw_text[:500])
     clean = _extract_json(raw_text)
+    if not clean.strip():
+        raise ValueError("LLM returned empty content after extraction")
     suggestions = json.loads(clean)
 
     # Normalise keys and drop malformed entries

@@ -9,8 +9,8 @@ import { useState, useCallback } from 'react';
 import { View, Text, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../src/context/AuthContext';
-import { updatePreferences } from '../../src/services/userService';
 import StepIndicator from '../../src/components/common/StepIndicator';
 import Button from '../../src/components/common/Button';
 import Tag from '../../src/components/common/Tag';
@@ -67,21 +67,12 @@ export default function OnboardingScreen() {
   const handleFinish = async () => {
     setSaving(true);
     try {
-      if (user?.id) {
-        await updatePreferences(user.id, {
-          cuisine_preferences: preferences.cuisinePreferences,
-          dietary_restrictions: preferences.dietaryRestrictions,
-          health_goal: preferences.healthGoal,
-          time_preference: preferences.timePreference,
-          meal_prep: preferences.mealPrep,
-          cooking_equipment: preferences.cookingEquipment,
-          perishable_optimization: preferences.perishableOptimizationPreference,
-        });
-      }
+      // Save preferences locally — backend sync happens lazily when server is needed
+      await AsyncStorage.setItem('@user_preferences', JSON.stringify(preferences));
       await completeOnboarding();
       router.replace('/(tabs)/discover');
     } catch {
-      // Preferences save failed - still complete onboarding so user is not blocked
+      // Still complete onboarding so user is not blocked
       await completeOnboarding();
       router.replace('/(tabs)/discover');
     } finally {

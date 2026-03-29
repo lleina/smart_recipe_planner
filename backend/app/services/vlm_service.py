@@ -1,18 +1,23 @@
 """
 VLM service - identifies ingredients from images.
 
-Uses any OpenAI-compatible vision endpoint (Ollama + Qwen3-VL, vLLM,
-LocalAI, etc.) configured via VLM_BASE_URL and VLM_MODEL in config.
-Falls back to mock data when VLM_BASE_URL is not configured.
+Uses Ollama's native /api/chat endpoint (NOT the OpenAI-compatible /v1)
+so that:
+  1. ``think: false`` is honoured — prevents thinking models (qwen3.5,
+     deepseek-r1) from consuming all tokens on internal reasoning.
+  2. Images are passed via the native ``images`` field (base64 list),
+     which is more reliable than OpenAI-style image_url content blocks
+     for local vision models.
 
-Default model: qwen3-vl:4b (via Ollama).
+Falls back to mock data when VLM_BASE_URL is not configured.
 """
 
 import base64
 import json
 import logging
+import re
 from app.config import VLM_BASE_URL, VLM_MODEL, VLM_TIMEOUT_SECONDS, VLM_API_KEY
-from app.services.inference_client import get_client
+from app.services.inference_client import ollama_chat
 from app.schemas import IngredientItem
 
 logger = logging.getLogger("app.vlm")
@@ -47,32 +52,39 @@ async def identify_ingredients(image_bytes_list: list[bytes]) -> list[Ingredient
 
 
 async def _call_vlm(image_bytes_list: list[bytes]) -> list[IngredientItem]:
-    client = get_client(base_url=VLM_BASE_URL, api_key=VLM_API_KEY or "local")
-    content: list[dict] = [{"type": "text", "text": VLM_PROMPT}]
-    for img_bytes in image_bytes_list:
-        b64 = base64.b64encode(img_bytes).decode("utf-8")
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-        })
-    response = await client.chat.completions.create(
+    b64_images = [base64.b64encode(b).decode("utf-8") for b in image_bytes_list]
+
+    raw_text = await ollama_chat(
+        base_url=VLM_BASE_URL,
         model=VLM_MODEL,
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": VLM_PROMPT, "images": b64_images}],
         max_tokens=2000,
+        temperature=0.3,
         timeout=VLM_TIMEOUT_SECONDS,
+        think=False,
     )
-    raw_text = response.choices[0].message.content or ""
-    raw_text = raw_text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return _parse_vlm_response(json.loads(raw_text))
+
+    clean = _extract_json(raw_text)
+    return _parse_vlm_response(json.loads(clean))
+
+
+def _extract_json(raw: str) -> str:
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    if match:
+        return match.group(0)
+    return raw
 
 
 def _parse_vlm_response(raw: list[dict]) -> list[IngredientItem]:
-    results = []
+    # First pass: build filtered list
+    parsed: list[IngredientItem] = []
     for item in raw:
         confidence = float(item.get("confidence", 0))
         if confidence < _CONFIDENCE_THRESHOLD:
             continue
-        results.append(IngredientItem(
+        parsed.append(IngredientItem(
             name=str(item.get("name", "unknown")).lower().strip(),
             confidence=confidence,
             category=item.get("category", "shelf-stable"),
@@ -80,6 +92,22 @@ def _parse_vlm_response(raw: list[dict]) -> list[IngredientItem]:
             estimated_quantity=float(item.get("estimatedQuantity", 1)),
             unit=str(item.get("unit", "pieces")),
         ))
+
+    # Second pass: deduplicate by name (case-insensitive).
+    # Keep the entry with the highest confidence; average quantities across duplicates.
+    seen: dict[str, IngredientItem] = {}
+    quantities: dict[str, list[float]] = {}
+    for item in parsed:
+        key = item.name  # already lowercased above
+        if key not in seen or item.confidence > seen[key].confidence:
+            seen[key] = item
+        quantities.setdefault(key, []).append(item.estimated_quantity)
+
+    results = []
+    for key, item in seen.items():
+        avg_qty = sum(quantities[key]) / len(quantities[key])
+        results.append(item.model_copy(update={"estimated_quantity": round(avg_qty, 2)}))
+
     return results
 
 

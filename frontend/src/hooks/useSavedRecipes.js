@@ -2,7 +2,7 @@
  * Hook for save/unsave recipe actions and saved recipe list management.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getSavedRecipes, saveRecipe, unsaveRecipe } from '../services/savedService';
 import { trackEvent } from '../services/eventService';
@@ -55,9 +55,13 @@ export default function useSavedRecipes() {
     }
   }, []);
 
-  const isSaved = useCallback((recipeId) => {
-    return savedRecipes.some((s) => s.recipeId === recipeId);
-  }, [savedRecipes]);
+  // O(1) Set lookup — avoids scanning the full array on every card render
+  const savedIdSet = useMemo(
+    () => new Set(savedRecipes.map((s) => s.recipeId)),
+    [savedRecipes],
+  );
+
+  const isSaved = useCallback((recipeId) => savedIdSet.has(recipeId), [savedIdSet]);
 
   return { savedRecipes, loading, error, save, remove, isSaved, reload: loadSaved };
 }
