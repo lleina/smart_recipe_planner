@@ -1,17 +1,19 @@
 """
-Recipe pipeline service - orchestrates LLM ideation, Spoonacular fetch, and ranking.
+Recipe pipeline service — orchestrates LLM ideation, web recipe fetch, and ranking.
 
 Stage flow:
-  1. Context Assembly  - merge user prefs + session context (done by caller)
-  2. LLM Ideation      - generate ~40 recipe name suggestions (llm_service)
-  3. Recipe Fetch      - match suggestions to real recipes (mock -> Spoonacular later)
-  4. Initial Ranking   - rule score + optional LLM re-rank (ranking_service)
-  5. Serve             - first 5 to client, rest held in session_pool
+  1. Context Assembly  — merge user prefs + session context (done by caller)
+  2. LLM Ideation      — generate ~40 recipe name suggestions (llm_service)
+  3a. Fast Fetch       — first INITIAL_FETCH_SIZE suggestions resolved before returning
+  3b. Background Fetch — remaining suggestions fetched async after response is sent
+  4. Initial Ranking   — rule score + optional LLM re-rank on first batch
+  5. Serve             — first BATCH_SIZE to client, rest accumulate in session_pool
 
 Ranking mode is set by RecommendRequest.ranking_mode or falls back to
 the RANKING_MODE environment variable (default: hybrid).
 """
 
+import asyncio
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -20,15 +22,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("app.pipeline")
+
 from app.models import SessionPool, RecipeCache, UserPreferences, CookHistory, SavedRecipe
 from app.schemas import (
     SessionContextRequest, RecommendResponse, NextBatchResponse,
     RerankResponse, RecipeOut,
 )
-from app.services import llm_service, ranking_service, spoonacular_client
-from app.config import RANKING_MODE, SPOONACULAR_API_KEY, USE_MOCK_RECIPES
+from app.services import llm_service, ranking_service, recipe_fetcher
+from app.config import RANKING_MODE
+from app.database import async_session as db_session_factory
 
+# Cards returned per page (per "Load More")
 BATCH_SIZE = 5
+# Suggestions resolved before the first response is sent; rest run in background
+INITIAL_FETCH_SIZE = 10
 
 
 async def run_pipeline(
@@ -41,22 +48,22 @@ async def run_pipeline(
     ranking_mode_override: Optional[str] = None,
 ) -> RecommendResponse:
     """
-    Runs the full 5-stage recipe pipeline and returns the first batch.
-    ranking_mode_override overrides the RANKING_MODE config for this request.
+    Runs the fast-path pipeline (first INITIAL_FETCH_SIZE suggestions) and immediately
+    fires a background task for the remaining suggestions.
     """
     dietary_restrictions = list(preferences.dietary_restrictions or []) if preferences else []
     cuisine_preferences = list(preferences.cuisine_preferences or []) if preferences else []
     cooking_equipment = list(preferences.cooking_equipment or []) if preferences else []
-    intolerances = list(preferences.intolerances or []) if preferences else []
-    diet = (preferences.diet or None) if preferences else None
     health_goal = (preferences.health_goal or "none") if preferences else "none"
     history_titles = [h.recipe_id for h in history[:10]]
 
     # Stage 2: LLM ideation
-    logger.info("[%s] Stage 2: LLM ideation (meal=%s, time=%dmin, ingredients=%d)",
-                user_id[:8], session_context.meal_type,
-                session_context.available_time_minutes,
-                len(session_context.available_ingredients))
+    logger.info(
+        "[%s] Stage 2: LLM ideation (meal=%s, time=%dmin, ingredients=%d)",
+        user_id[:8], session_context.meal_type,
+        session_context.available_time_minutes,
+        len(session_context.available_ingredients),
+    )
     suggestions = await llm_service.ideate_recipes(
         context=session_context,
         dietary_restrictions=dietary_restrictions,
@@ -65,19 +72,15 @@ async def run_pipeline(
         history_titles=history_titles,
     )
 
-    # Stage 3: Recipe fetch (cache-first Spoonacular or mock fallback)
+    first_suggestions = suggestions[:INITIAL_FETCH_SIZE]
+    rest_suggestions = suggestions[INITIAL_FETCH_SIZE:]
+
+    # Stage 3a: Fast fetch — first INITIAL_FETCH_SIZE suggestions only
     logger.info(
-        "[%s] Stage 3: fetching %d recipes (mode=%s)",
-        user_id[:8], len(suggestions),
-        "MOCK" if (USE_MOCK_RECIPES or not SPOONACULAR_API_KEY) else "SPOONACULAR",
+        "[%s] Stage 3a: fast fetch — %d suggestions (remaining %d deferred to background)",
+        user_id[:8], len(first_suggestions), len(rest_suggestions),
     )
-    recipes_raw = await _fetch_recipes(
-        suggestions, session_context, db,
-        cuisine_preferences=cuisine_preferences,
-        diet=diet,
-        intolerances=intolerances,
-        cooking_equipment=cooking_equipment,
-    )
+    recipes_raw = await recipe_fetcher.fetch_recipes_batch(first_suggestions, session_context, db)
 
     # Stage 4: Ranking
     effective_mode = ranking_mode_override or RANKING_MODE
@@ -90,6 +93,15 @@ async def run_pipeline(
         cooking_equipment=cooking_equipment,
         mode=effective_mode,
     )
+
+    # Deduplicate by ID
+    seen_ids: set[str] = set()
+    deduped = []
+    for r in ranked:
+        if r["id"] not in seen_ids:
+            deduped.append(r)
+            seen_ids.add(r["id"])
+    ranked = deduped
 
     # Stage 5: Persist session pool
     pool_id = str(uuid.uuid4())
@@ -119,7 +131,6 @@ async def run_pipeline(
     for r in ranked:
         cached = RecipeCache(
             id=r["id"],
-            spoonacular_id=r.get("spoonacular_id", r["id"]),
             title=r["title"],
             description=r.get("description", ""),
             image=r.get("image", ""),
@@ -132,6 +143,7 @@ async def run_pipeline(
             meal_type=r.get("meal_type", [session_context.meal_type]),
             occasions=r.get("occasions", [session_context.occasion] if session_context.occasion else []),
             rating=r.get("rating", 4.0),
+            source=r.get("source", "web"),
             source_url=r.get("source_url", ""),
             cooking_equipment=r.get("cooking_equipment", []),
             ingredients=r.get("ingredients", []),
@@ -149,29 +161,126 @@ async def run_pipeline(
     await db.commit()
     await db.refresh(pool)
 
-    # Log the final ranked order so you can compare LLM suggestions → final cards
-    credits = spoonacular_client.get_credits_used()
-    if credits > 0:
-        logger.info("[%s] Spoonacular credits used this session: ~%d", user_id[:8], credits)
-    logger.info("[%s] Stage 4 → final ranking (%d recipes):", user_id[:8], len(ranked))
-    for pos, r in enumerate(ranked, 1):
-        score_str = f"{r.get('score', 0):.1f}"
-        ingr_names = ", ".join(i.get("name", "") for i in (r.get("ingredients") or [])[:4])
-        logger.info(
-            "  %2d. %-45s | score=%s | cuisine=%-14s | ingredients: %s",
-            pos, r.get("title", "?"), score_str, r.get("cuisine", ""), ingr_names,
-        )
+    logger.info(
+        "[%s] Stage 5: pool %s created — %d fast recipes, serving first %d. "
+        "Background fetch of %d more suggestions starting.",
+        user_id[:8], pool_id[:8], len(ranked), min(BATCH_SIZE, len(ranked)), len(rest_suggestions),
+    )
 
-    logger.info("[%s] Stage 5: pool %s created — %d recipes, serving first %d",
-                user_id[:8], pool_id[:8], len(ranked), min(BATCH_SIZE, len(ranked)))
+    # Stage 3b: Fire background task for remaining suggestions
+    if rest_suggestions:
+        asyncio.create_task(
+            _background_fetch_and_append(
+                pool_id=pool_id,
+                suggestions=rest_suggestions,
+                session_context=session_context,
+                dietary_restrictions=dietary_restrictions,
+                cuisine_preferences=cuisine_preferences,
+                cooking_equipment=cooking_equipment,
+                existing_ids=set(seen_ids),
+                ranking_mode=effective_mode,
+            )
+        )
 
     return RecommendResponse(
         session_pool_id=pool.id,
         recipes=[_to_out(r) for r in ranked[:BATCH_SIZE]],
         pool_size=len(ranked),
-        shown_count=BATCH_SIZE,
+        shown_count=min(BATCH_SIZE, len(ranked)),
         ranking_mode_used=effective_mode,
     )
+
+
+async def _background_fetch_and_append(
+    pool_id: str,
+    suggestions: list[dict],
+    session_context: SessionContextRequest,
+    dietary_restrictions: list[str],
+    cuisine_preferences: list[str],
+    cooking_equipment: list[str],
+    existing_ids: set[str],
+    ranking_mode: str,
+) -> None:
+    """
+    Background task: fetch + rank remaining suggestions and append them to the pool.
+    Uses its own DB session since the request session has already been closed.
+    """
+    logger.info("[bg/%s] Starting background fetch of %d suggestions", pool_id[:8], len(suggestions))
+    try:
+        async with db_session_factory() as db:
+            recipes_raw = await recipe_fetcher.fetch_recipes_batch(suggestions, session_context, db)
+
+            if not recipes_raw:
+                logger.info("[bg/%s] Background fetch returned 0 recipes — nothing to append", pool_id[:8])
+                return
+
+            ranked = await ranking_service.rank_recipes(
+                recipes=recipes_raw,
+                context=session_context,
+                dietary_restrictions=dietary_restrictions,
+                cuisine_preferences=cuisine_preferences,
+                cooking_equipment=cooking_equipment,
+                mode=ranking_mode,
+            )
+
+            # Fetch pool and append new recipes
+            result = await db.execute(select(SessionPool).where(SessionPool.id == pool_id))
+            pool = result.scalar_one_or_none()
+            if not pool:
+                logger.warning("[bg/%s] Pool not found — aborting background append", pool_id[:8])
+                return
+
+            current_pool = list(pool.recipes or [])
+            current_ids = {r["recipeId"] for r in current_pool} | existing_ids
+            new_entries = []
+
+            for r in ranked:
+                if r["id"] in current_ids:
+                    continue
+                current_ids.add(r["id"])
+                rank_pos = len(current_pool) + len(new_entries) + 1
+                new_entries.append({
+                    "recipeId": r["id"],
+                    "score": r.get("score", 0.0),
+                    "status": "unshown",
+                    "shownAt": None,
+                    "rankPosition": rank_pos,
+                })
+                cached = RecipeCache(
+                    id=r["id"],
+                    title=r["title"],
+                    description=r.get("description", ""),
+                    image=r.get("image", ""),
+                    prep_time=r.get("prep_time", 10),
+                    cook_time=r.get("cook_time", 25),
+                    total_time=r.get("total_time", 35),
+                    difficulty=r.get("difficulty", "medium"),
+                    servings=r.get("servings", 4),
+                    cuisine=r.get("cuisine", ""),
+                    meal_type=r.get("meal_type", [session_context.meal_type]),
+                    occasions=r.get("occasions", []),
+                    rating=r.get("rating", 4.0),
+                    source=r.get("source", "web"),
+                    source_url=r.get("source_url", ""),
+                    cooking_equipment=r.get("cooking_equipment", []),
+                    ingredients=r.get("ingredients", []),
+                    instructions=r.get("instructions", []),
+                )
+                await db.merge(cached)
+
+            if new_entries:
+                pool.recipes = current_pool + new_entries
+                pool.total_fetched = (pool.total_fetched or 0) + len(new_entries)
+                await db.commit()
+                logger.info(
+                    "[bg/%s] Appended %d more recipes to pool (total=%d)",
+                    pool_id[:8], len(new_entries), pool.total_fetched,
+                )
+            else:
+                logger.info("[bg/%s] No new unique recipes to append", pool_id[:8])
+
+    except Exception as exc:
+        logger.error("[bg/%s] Background fetch failed: %s", pool_id[:8], exc, exc_info=True)
 
 
 async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchResponse:
@@ -187,7 +296,6 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
     pool.shown_count = (pool.shown_count or 0) + len(batch_ids)
     pool.recipes = pool_recipes
 
-    # Look up recipe details from the DB cache (populated by run_pipeline)
     result = await db.execute(
         select(RecipeCache).where(RecipeCache.id.in_(batch_ids))
     )
@@ -228,121 +336,14 @@ async def rerank_pool(
     await db.commit()
 
     return RerankResponse(
-        message="Pool re-ranked based on preference inference",
+        message="Pool updated with preference signal",
         preference_inference=pool.last_preference_inference,
     )
 
 
-async def _fetch_recipes(
-    suggestions: list[dict],
-    ctx: SessionContextRequest,
-    db: AsyncSession,
-    cuisine_preferences: list[str] | None = None,
-    diet: str | None = None,
-    intolerances: list[str] | None = None,
-    cooking_equipment: list[str] | None = None,
-) -> list[dict]:
-    """
-    Stage 3 dispatch:
-    - USE_MOCK_RECIPES=true (default) or no key → fast mock templates, 0 credits.
-    - USE_MOCK_RECIPES=false + key present  → cache-first Spoonacular lookup.
-    """
-    if USE_MOCK_RECIPES or not SPOONACULAR_API_KEY:
-        return _fetch_recipes_mock(suggestions, ctx)
-    return await _fetch_recipes_spoonacular(
-        suggestions, ctx, db,
-        cuisine_preferences=cuisine_preferences,
-        diet=diet,
-        intolerances=intolerances,
-        cooking_equipment=cooking_equipment,
-    )
-
-
-async def _fetch_recipes_spoonacular(
-    suggestions: list[dict],
-    ctx: SessionContextRequest,
-    db: AsyncSession,
-    cuisine_preferences: list[str] | None = None,
-    diet: str | None = None,
-    intolerances: list[str] | None = None,
-    cooking_equipment: list[str] | None = None,
-) -> list[dict]:
-    """
-    Cache-first Spoonacular fetch.
-    For each LLM suggestion:
-      1. Check RecipeCache by title similarity — free.
-      2. On cache miss, call Spoonacular — costs ~2 credits.
-    Suggestions that cannot be resolved are silently dropped.
-    """
-    results = []
-    for suggestion in suggestions:
-        try:
-            recipe = await spoonacular_client.find_recipe(
-                suggestion_name=suggestion.get("name", ""),
-                key_ingredients=suggestion.get("key_ingredients", []),
-                db=db,
-                cuisine_preferences=cuisine_preferences,
-                diet=diet,
-                intolerances=intolerances,
-                equipment=cooking_equipment,
-            )
-            if recipe:
-                # Keep LLM time estimate; Spoonacular's can be inaccurate
-                if suggestion.get("estimated_time"):
-                    recipe["total_time"] = suggestion["estimated_time"]
-                recipe["meal_type"] = [ctx.meal_type]
-                results.append(recipe)
-        except Exception as exc:
-            logger.warning("Spoonacular lookup failed for '%s': %s", suggestion.get("name"), exc)
-    logger.info(
-        "Spoonacular fetch complete: %d/%d suggestions resolved",
-        len(results), len(suggestions),
-    )
-    return results
-
-
-def _fetch_recipes_mock(
-    suggestions: list[dict],
-    ctx: SessionContextRequest,
-) -> list[dict]:
-    """
-    Mock recipe fetch: zero API calls, zero credits.
-    Uses hardcoded templates as skeletons but substitutes the LLM's
-    suggestion name, cuisine, time, and key_ingredients so the ranker
-    scores against real pantry data rather than hardcoded mock ingredients.
-    """
-    result = []
-    for i, suggestion in enumerate(suggestions):
-        mock_idx = i % len(_MOCK_RECIPES)
-        base = dict(_MOCK_RECIPES[mock_idx])
-        base["id"] = f"r{i:02d}"
-        base["spoonacular_id"] = f"sp-gen-{i:04d}"
-        base["title"] = suggestion.get("name", base["title"])
-        base["cuisine"] = suggestion.get("cuisine", base["cuisine"])
-        base["total_time"] = suggestion.get("estimated_time", base["total_time"])
-        base["meal_type"] = [ctx.meal_type]
-
-        # --- KEY FIX: use the LLM's key_ingredients for scoring, not the mock
-        # template's ingredients. Without this, the ranker compares mock salmon/
-        # pasta/etc. against the user's actual pantry and produces nonsense scores.
-        key_ingr = suggestion.get("key_ingredients", [])
-        if key_ingr:
-            base["ingredients"] = [
-                {"name": name.lower().strip(), "quantity": 1, "unit": "as needed"}
-                for name in key_ingr
-            ]
-
-        result.append(base)
-    return result
-
-
 def _recipe_cache_to_dict(rc: RecipeCache) -> dict:
-    """
-    Converts a RecipeCache ORM row to the dict shape expected by _to_out.
-    """
     return {
         "id": rc.id,
-        "spoonacular_id": rc.spoonacular_id,
         "title": rc.title,
         "description": rc.description,
         "image": rc.image,
@@ -355,6 +356,7 @@ def _recipe_cache_to_dict(rc: RecipeCache) -> dict:
         "meal_type": rc.meal_type,
         "occasions": rc.occasions,
         "rating": rc.rating,
+        "source": rc.source,
         "source_url": rc.source_url,
         "cooking_equipment": rc.cooking_equipment,
         "ingredients": rc.ingredients,
@@ -366,7 +368,6 @@ def _recipe_cache_to_dict(rc: RecipeCache) -> dict:
 def _to_out(r: dict) -> RecipeOut:
     return RecipeOut(
         id=r["id"],
-        spoonacular_id=r.get("spoonacular_id"),
         title=r["title"],
         description=r.get("description", ""),
         image=r.get("image", ""),
@@ -385,64 +386,3 @@ def _to_out(r: dict) -> RecipeOut:
         instructions=r.get("instructions", []),
         score=r.get("score", 0.0),
     )
-
-
-_MOCK_RECIPES = [
-    {
-        "id": f"r{i:02d}",
-        "spoonacular_id": f"sp-{1000+i}",
-        "title": title,
-        "description": desc,
-        "image": f"https://spoonacular.com/recipeImages/{1000+i}-312x231.jpg",
-        "prep_time": prep,
-        "cook_time": cook,
-        "total_time": prep + cook,
-        "difficulty": diff,
-        "servings": 4,
-        "cuisine": cuisine,
-        "meal_type": ["dinner"],
-        "occasions": ["weeknight"],
-        "rating": rating,
-        "source_url": f"https://spoonacular.com/recipes/{1000+i}",
-        "cooking_equipment": equip,
-        "ingredients": ingr,
-        "instructions": [
-            {"step": 1, "text": "Prepare all ingredients.", "image": None},
-            {"step": 2, "text": "Cook according to method.", "image": None},
-            {"step": 3, "text": "Season to taste and serve.", "image": None},
-        ],
-        "score": round(0.95 - i * 0.02, 2),
-    }
-    for i, (title, desc, prep, cook, diff, cuisine, rating, equip, ingr) in enumerate([
-        ("Tomato Basil Pasta", "Classic Italian pasta with fresh tomatoes and basil",
-         10, 20, "easy", "italian", 4.7, ["stovetop"],
-         [{"name": "pasta", "quantity": 1, "unit": "lb"}, {"name": "tomato", "quantity": 4, "unit": "pieces"}]),
-        ("Chicken Stir Fry", "Quick and healthy chicken with mixed vegetables",
-         15, 15, "easy", "asian", 4.5, ["stovetop", "wok"],
-         [{"name": "chicken breast", "quantity": 2, "unit": "pieces"}, {"name": "bell pepper", "quantity": 2, "unit": "pieces"}]),
-        ("Grilled Salmon Bowl", "Fresh salmon over rice with avocado and greens",
-         10, 15, "medium", "japanese", 4.8, ["grill", "stovetop"],
-         [{"name": "salmon fillet", "quantity": 2, "unit": "pieces"}, {"name": "rice", "quantity": 1, "unit": "cups"}]),
-        ("Vegetable Curry", "Creamy coconut curry with seasonal vegetables",
-         15, 25, "medium", "indian", 4.6, ["stovetop"],
-         [{"name": "coconut milk", "quantity": 1, "unit": "can"}, {"name": "onion", "quantity": 2, "unit": "pieces"}]),
-        ("Mediterranean Quinoa Salad", "Light and refreshing quinoa with olives and feta",
-         15, 15, "easy", "mediterranean", 4.4, ["stovetop"],
-         [{"name": "quinoa", "quantity": 1, "unit": "cups"}, {"name": "tomato", "quantity": 3, "unit": "pieces"}]),
-        ("Beef Tacos", "Seasoned ground beef tacos with fresh toppings",
-         10, 15, "easy", "mexican", 4.5, ["stovetop"],
-         [{"name": "ground beef", "quantity": 1, "unit": "lb"}, {"name": "onion", "quantity": 1, "unit": "pieces"}]),
-        ("Mushroom Risotto", "Creamy arborio rice with mixed mushrooms",
-         10, 30, "medium", "italian", 4.7, ["stovetop"],
-         [{"name": "arborio rice", "quantity": 1, "unit": "cups"}, {"name": "mushroom", "quantity": 8, "unit": "pieces"}]),
-        ("Thai Green Curry", "Spicy green curry with chicken and Thai basil",
-         15, 20, "medium", "thai", 4.6, ["stovetop"],
-         [{"name": "chicken thigh", "quantity": 1, "unit": "lb"}, {"name": "green curry paste", "quantity": 2, "unit": "tbsp"}]),
-        ("Sheet Pan Roasted Vegetables", "Simple roasted seasonal vegetables with herbs",
-         10, 25, "easy", "american", 4.3, ["oven"],
-         [{"name": "bell pepper", "quantity": 2, "unit": "pieces"}, {"name": "zucchini", "quantity": 2, "unit": "pieces"}]),
-        ("Lemon Herb Chicken", "Juicy oven-roasted chicken with lemon and herbs",
-         10, 35, "easy", "american", 4.6, ["oven"],
-         [{"name": "chicken breast", "quantity": 4, "unit": "pieces"}, {"name": "lemon", "quantity": 2, "unit": "pieces"}]),
-    ])
-]

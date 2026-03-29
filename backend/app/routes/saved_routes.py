@@ -74,18 +74,27 @@ async def save_recipe(
     return _enrich(entry, recipe)
 
 
-@router.delete("/{recipe_id}", status_code=204)
+@router.delete("/{entry_id}", status_code=204)
 async def unsave_recipe(
-    recipe_id: str,
+    entry_id: str,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
+    # Try by entry primary key first (frontend sends the SavedRecipe.id)
     result = await db.execute(
         select(SavedRecipe).where(
-            SavedRecipe.recipe_id == recipe_id, SavedRecipe.user_id == user_id
+            SavedRecipe.id == entry_id, SavedRecipe.user_id == user_id
         )
     )
     entry = result.scalar_one_or_none()
+    # Fallback: try by recipe_id for backwards compat
+    if not entry:
+        result = await db.execute(
+            select(SavedRecipe).where(
+                SavedRecipe.recipe_id == entry_id, SavedRecipe.user_id == user_id
+            )
+        )
+        entry = result.scalar_one_or_none()
     if not entry:
         raise HTTPException(status_code=404, detail="Saved recipe not found")
     await db.delete(entry)

@@ -52,7 +52,6 @@ class RecipeCache(Base):
     __tablename__ = "recipe_cache"
 
     id = Column(String, primary_key=True, default=gen_id)
-    spoonacular_id = Column(String, unique=True, index=True)
     title = Column(String, nullable=False)
     description = Column(Text, default="")
     image = Column(String, default="")
@@ -65,7 +64,7 @@ class RecipeCache(Base):
     meal_type = Column(JSON, default=list)
     occasions = Column(JSON, default=list)
     rating = Column(Float, default=0.0)
-    source = Column(String, default="spoonacular")
+    source = Column(String, default="web")
     source_url = Column(String, default="")
     cooking_equipment = Column(JSON, default=list)
     ingredients = Column(JSON, default=list)

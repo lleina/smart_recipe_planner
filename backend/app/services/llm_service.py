@@ -16,6 +16,48 @@ from app.schemas import SessionContextRequest, IngredientItem
 
 logger = logging.getLogger("app.llm")
 
+# ---------------------------------------------------------------------------
+# Ingredient name normalization
+# ---------------------------------------------------------------------------
+# Strips brand names and quality/marketing adjectives before the name is
+# embedded in the LLM prompt.  If the model never *sees* "Fairlife milk" it
+# cannot copy it into key_ingredients.
+_QUALIFIER_RE = re.compile(
+    r"\b("
+    r"fairlife|kirkland|barilla|heinz|organic\s+valley|land\s+o\s+lakes|"
+    r"birds\s+eye|del\s+monte|hunts?|campbells?|knorr|maggi|kikkoman|"
+    r"365\s+by\s+whole\s+foods|great\s+value|store\s+brand|"
+    r"grass[-\s]fed|free[-\s]range|pasture[-\s]raised|cage[-\s]free|"
+    r"organic|natural|premium|artisan|gourmet|all[-\s]natural|"
+    r"non[-\s]gmo|non\s+gmo|gluten[-\s]free|kosher|halal|"
+    r"tri[-\s]color|multi[-\s]color|multicolor|heirloom|"
+    r"purified\s+drinking|purified|distilled|filtered|sparkling|still|"
+    r"whole\s+grain|whole[-\s]wheat|stone[-\s]ground|"
+    r"low[-\s]fat|non[-\s]fat|fat[-\s]free|reduced[-\s]fat|full[-\s]fat|"
+    r"skim|2%|1%|whole|"
+    r"unsalted|lightly\s+salted|salted|unsweetened|sweetened|"
+    r"extra\s+virgin|light|extra[-\s]lean|lean|extra[-\s]firm|firm|silken|"
+    r"fresh|frozen|canned|tinned|jarred|dried|dehydrated|"
+    r"raw|cooked|roasted|toasted|smoked|cured|pickled|"
+    r"boneless|skinless|bone[-\s]in|skin[-\s]on|center[-\s]cut|"
+    r"baby|mini|large|medium|small|xl|jumbo|"
+    r"drinking|mineral"
+    r")\s+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_ingredient_name(raw: str) -> str:
+    """Strip brand names and quality qualifiers, returning the plain culinary name."""
+    # Iteratively strip until no more matches (handles stacked qualifiers like
+    # 'organic grass-fed ground beef')
+    prev = None
+    result = raw.strip()
+    while result != prev:
+        prev = result
+        result = _QUALIFIER_RE.sub("", result).strip()
+    return result or raw.strip()
+
 
 def _extract_json(raw: str) -> str:
     """Strip <think> blocks, markdown fences, and other wrapper text to get raw JSON.
@@ -62,7 +104,46 @@ _SYSTEM_PROMPT = (
     "The remaining suggestions should focus on variety and the best possible dishes "
     "from everything available. "
     "Every dish must be a recognisable, culinarily coherent recipe. "
+    "\n\n"
+    "STRICT INGREDIENT RULES:\n"
+    "1. key_ingredients must ONLY contain ingredients from the user's available "
+    "ingredient list provided in the prompt. Do NOT invent ingredients that are "
+    "not listed — if strawberries are not in the list, do not include them. "
+    "It is fine to use pantry staples (salt, oil, pepper) that may not be listed, "
+    "but never invent a main ingredient that is not present.\n"
+    "2. Strip ALL brand names and quality descriptors from ingredient names — "
+    "use only the plain culinary name a cookbook would use.\n"
+    "Examples of correct stripping:\n"
+    "  'Fairlife milk'              → 'milk'\n"
+    "  'Kirkland grass-fed ground beef' → 'ground beef'\n"
+    "  'Barilla tri-color rotini pasta' → 'rotini pasta'\n"
+    "  'purified drinking water'    → 'water'\n"
+    "  'grass-fed ground beef'      → 'ground beef'\n"
+    "  'free-range chicken breast'  → 'chicken breast'\n"
+    "The key_ingredients list must contain only plain culinary names — no brands, "
+    "no certifications (organic, grass-fed, free-range, non-GMO), no packaging "
+    "descriptors (purified, filtered, drinking). "
+    "\n\n"
     "Output ONLY a valid JSON array. No markdown, no explanation."
+    "\n\n"
+    "RECIPE NAME RULES:\n"
+    "The 'name' field is used verbatim as a web search query to find a real recipe. "
+    "It MUST return results, so follow these rules strictly:\n"
+    "1. Keep it SHORT — 2 to 5 words maximum.\n"
+    "2. Use COMMON, well-known dish names that people actually search for on AllRecipes or "
+    "Food Network — not invented or overly creative names.\n"
+    "3. NO 'X with Y' patterns. Never append ingredients using 'with', 'and', or commas. "
+    "Bad: 'Beef Stew with Potatoes and Carrots and Honey'. Good: 'Beef Stew'.\n"
+    "4. NO generic adjective qualifiers at the start — no Classic, Easy, Quick, Simple, "
+    "Homemade, Traditional, Authentic, Rustic, Hearty, Creamy, Crispy, Healthy, Best, Ultimate.\n"
+    "5. The name must be a real dish that exists, not a forced ingredient mashup.\n"
+    "GOOD names: 'Beef Stew', 'Honey Garlic Chicken', 'Pasta Bolognese', "
+    "'Chicken Stir Fry', 'Mushroom Risotto', 'Vegetable Curry', 'French Toast', "
+    "'Ground Beef Tacos', 'Spaghetti Carbonara', 'Banana Pancakes'.\n"
+    "BAD names: 'Classic Rustic Beef Strudel with Honey and Strawberries', "
+    "'Easy Homemade Tri-Color Pasta Bake with Ground Beef, Milk and Honey'.\n"
+    "The key_ingredients list tells the ranker what ingredients to use — "
+    "you do NOT need to cram them into the dish name."
 )
 
 
@@ -74,12 +155,12 @@ def _build_user_prompt(
     history_titles: list[str],
 ) -> str:
     urgent = [
-        f"{i.name} ({i.estimated_quantity} {i.unit}, use within {i.urgency} days)"
+        f"{_normalize_ingredient_name(i.name)} ({i.estimated_quantity} {i.unit}, use within {i.urgency} days)"
         for i in context.available_ingredients
         if i.urgency is not None and i.urgency <= 3
     ]
     regular = [
-        f"{i.name} ({i.estimated_quantity} {i.unit})"
+        f"{_normalize_ingredient_name(i.name)} ({i.estimated_quantity} {i.unit})"
         for i in context.available_ingredients
         if i.urgency is None or i.urgency > 3
     ]
@@ -105,15 +186,29 @@ def _build_user_prompt(
         recent = history_titles[:5]
         lines.append(f"Recently cooked (avoid exact repeats): {', '.join(recent)}")
 
+    urgency_target = int(_IDEATION_COUNT * 0.4)
+    urgency_instruction = (
+        f"IMPORTANT: approximately {urgency_target} of your {_IDEATION_COUNT} suggestions "
+        "must feature the URGENT ingredients as a central, delicious component of the dish — "
+        "not a minor garnish. Choose dishes where those ingredients genuinely shine and taste great. "
+        "Never sacrifice taste to use an expiring ingredient — the dish must still be crave-worthy. "
+    ) if urgent else ""
+
     lines.append("")
     lines.append(
         f"Generate exactly {_IDEATION_COUNT} recipe suggestions. "
         "For each return a JSON object with: "
-        "\"name\" (string), \"key_ingredients\" (list of 3-5 strings), "
+        "\"name\" (2-5 word common recipe name as you would search on AllRecipes — "
+        "NO 'with/and ingredient' suffixes, NO qualifier adjectives like Classic/Easy/Homemade, "
+        "real dish names only e.g. 'Beef Stew' NOT 'Classic Beef Stew with Potatoes'), "
+        "\"key_ingredients\" (list of 3-5 PLAIN generic ingredient names — "
+        "strip all brands and qualifiers: 'Fairlife milk' → 'milk', "
+        "'grass-fed ground beef' → 'ground beef', "
+        "'tri-color rotini pasta' → 'rotini pasta', "
+        "'purified drinking water' → 'water'), "
         "\"cuisine\" (string), \"estimated_time\" (integer minutes). "
-        "Focus on well-known, genuinely tasty dishes. "
-        "Where it makes natural culinary sense, some recipes may incorporate the urgent ingredients — "
-        "but never sacrifice taste or create an unrecognisable dish just to use them. "
+        + urgency_instruction +
+        "Focus on well-known, genuinely tasty dishes people would be excited to cook and eat. "
         "Suggest a variety of cuisines and styles. "
         "Ensure every suggestion respects the dietary restrictions. "
         "Return ONLY a JSON array."
@@ -212,7 +307,7 @@ async def _call_llm(
 def _fallback_suggestions(context: SessionContextRequest) -> list[dict]:
     """
     Keyword-based fallback used when LLM is unavailable.
-    Returns ingredient names directly as search terms for Spoonacular.
+    Returns ingredient names directly as search terms for the recipe fetcher.
     """
     ingredient_names = [i.name for i in context.available_ingredients]
     base = [
@@ -236,3 +331,70 @@ def _fallback_suggestions(context: SessionContextRequest) -> list[dict]:
             "estimated_time": context.available_time_minutes,
         })
     return base[:_IDEATION_COUNT]
+
+
+# ---------------------------------------------------------------------------
+# Ingredient substitution via LLM
+# ---------------------------------------------------------------------------
+
+_SUBSTITUTION_PROMPT = """\
+You are a helpful cooking assistant. Given a recipe's ingredients and a list of ingredients the user already has, identify which recipe ingredients the user is MISSING, and suggest a practical substitution from the user's available ingredients or common pantry staples.
+
+Recipe ingredients:
+{recipe_ingredients}
+
+User has these ingredients available:
+{user_ingredients}
+
+Return a JSON array of objects. Each object represents ONE recipe ingredient and has these fields:
+- "ingredient": the recipe ingredient name (exactly as listed)
+- "have": true if the user has this ingredient (or a very close match), false otherwise
+- "substitution": if have is false and a good swap exists, a short string like "use <X> instead". If no good substitution exists, null.
+
+Rules:
+- Match loosely: "chicken breast" matches "chicken", "olive oil" matches "oil", etc.
+- Only suggest substitutions that genuinely work in cooking (e.g. lime for lemon, Greek yogurt for sour cream, any pasta shape for another).
+- If the user doesn't have a substitute, set substitution to null.
+- Return ONLY the JSON array, no explanation.
+"""
+
+
+async def suggest_substitutions(
+    recipe_ingredients: list[str],
+    user_ingredients: list[str],
+) -> list[dict]:
+    """
+    Ask the LLM to match recipe ingredients against the user's pantry and
+    suggest substitutions for missing items.
+
+    Returns a list of dicts: [{ingredient, have, substitution}, ...]
+    Falls back to empty list if LLM is unavailable.
+    """
+    if not LLM_BASE_URL or not recipe_ingredients:
+        return []
+
+    prompt = _SUBSTITUTION_PROMPT.format(
+        recipe_ingredients="\n".join(f"- {ing}" for ing in recipe_ingredients),
+        user_ingredients="\n".join(f"- {ing}" for ing in user_ingredients) if user_ingredients else "(none listed)",
+    )
+
+    try:
+        raw = await ollama_chat(
+            base_url=LLM_BASE_URL,
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2048,
+            temperature=0.3,
+            timeout=float(LLM_TIMEOUT_SECONDS),
+            think=False,
+        )
+        cleaned = _extract_json(raw)
+        results = json.loads(cleaned)
+        if isinstance(results, list):
+            logger.info("LLM substitution: %d ingredients analysed", len(results))
+            return results
+        logger.warning("LLM substitution returned non-list: %s", type(results))
+        return []
+    except Exception as exc:
+        logger.warning("LLM substitution failed: %s", exc)
+        return []

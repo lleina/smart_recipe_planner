@@ -11,5 +11,8 @@ passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.9
 Pillow>=10.0.0
 openai>=1.50.0
+# Web recipe fetcher (replaces Spoonacular)
+recipe-scrapers>=15.0.0
+ddgs>=0.1.0
 pytest>=8.0.0
 pytest-asyncio>=0.24.0

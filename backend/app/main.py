@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-from app.config import CORS_ORIGINS, SPOONACULAR_API_KEY, LLM_BASE_URL, VLM_BASE_URL, USE_MOCK_RECIPES
+from app.config import CORS_ORIGINS, LLM_BASE_URL, VLM_BASE_URL, SERPAPI_KEY, WEB_RECIPE_SITES
 from app.database import init_db
 from app.routes import (
     auth_routes, user_routes, vlm_routes,
@@ -39,20 +39,15 @@ async def lifespan(application: FastAPI):
     # Startup configuration summary — makes it immediately obvious which
     # external services are live vs. running in mock/fallback mode.
     # -----------------------------------------------------------------------
-    if not SPOONACULAR_API_KEY:
-        logger.warning(
-            "SPOONACULAR_API_KEY is not set — recipe fetch will use MOCK DATA. "
-            "Ingredients, images, and instructions will be hardcoded templates, not real recipes. "
-            "Set SPOONACULAR_API_KEY in .env to get real recipe data."
-        )
-    elif USE_MOCK_RECIPES:
-        logger.warning(
-            "USE_MOCK_RECIPES=true — Spoonacular key is set but the pipeline will still use "
-            "mock data. Set USE_MOCK_RECIPES=false in .env to enable live recipe fetching. "
-            "Tip: run 'python scripts/seed_cache.py' first to pre-fill the cache cheaply."
-        )
+    # Web recipe fetcher — always active; SerpAPI is optional
+    if SERPAPI_KEY:
+        logger.info("Recipe fetcher: web mode with SerpAPI ✓ (sites: %s)", WEB_RECIPE_SITES)
     else:
-        logger.info("Spoonacular: live mode ✓ (cache-first, key configured)")
+        logger.info(
+            "Recipe fetcher: web mode via DuckDuckGo (free, no key) — "
+            "set SERPAPI_KEY in .env for higher-reliability Google-backed search. "
+            "Sites: %s", WEB_RECIPE_SITES
+        )
 
     if not LLM_BASE_URL:
         logger.warning(
@@ -124,7 +119,7 @@ app.include_router(recipe_routes.router)
 @app.get("/api/health")
 async def health_check():
     """NFR-OBS-02: Health check with dependency status."""
-    from app.config import VLM_BASE_URL, LLM_BASE_URL, SPOONACULAR_API_KEY
+    from app.config import VLM_BASE_URL, LLM_BASE_URL, SERPAPI_KEY
     from app.database import engine as db_engine
     import httpx
 
@@ -166,8 +161,8 @@ async def health_check():
     else:
         deps["llm"] = "mock"
 
-    # Spoonacular check
-    deps["spoonacular"] = "ok" if SPOONACULAR_API_KEY else "mock"
+    # Web recipe fetcher — always active; SerpAPI enhances reliability
+    deps["recipe_fetcher"] = "serpapi" if SERPAPI_KEY else "duckduckgo"
 
     all_vals = list(deps.values())
     if all(v in ("ok", "mock") for v in all_vals):

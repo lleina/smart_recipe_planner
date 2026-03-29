@@ -13,14 +13,28 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = 60 * 24
 JWT_REFRESH_EXPIRY_DAYS = 30
 
-SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY", "")
-SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
+# ---------------------------------------------------------------------------
+# Web recipe fetcher configuration
+# Stage 3 uses DuckDuckGo search (free, no key) + recipe-scrapers to fetch
+# real recipes from quality cooking sites. SerpAPI is optional for higher
+# reliability at scale (set SERPAPI_KEY to enable).
+# ---------------------------------------------------------------------------
 
-# When True, the pipeline always uses hardcoded mock templates instead of
-# calling the Spoonacular API, regardless of whether a key is set.
-# Default: True — you must explicitly opt-in to real API calls.
-# Set USE_MOCK_RECIPES=false in .env only when you want to use real credits.
-USE_MOCK_RECIPES = os.getenv("USE_MOCK_RECIPES", "true").lower() in ("true", "1", "yes")
+# Optional: SerpAPI key for Google-backed search (more reliable than DuckDuckGo).
+# Leave empty to use DuckDuckGo for free.
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+
+# Per-URL HTTP timeout in seconds for recipe scraping.
+WEB_RECIPE_TIMEOUT = int(os.getenv("WEB_RECIPE_TIMEOUT", "10"))
+
+# Space-separated list of cooking site domains to target in web searches.
+# recipe-scrapers supports all of these with structured data extraction.
+WEB_RECIPE_SITES = os.getenv(
+    "WEB_RECIPE_SITES",
+    "budgetbytes.com recipetineats.com skinnytaste.com tasty.co cookingclassy.com "
+    "cafedelites.com therecipecritic.com natashaskitchen.com gimmesomeoven.com "
+    "damndelicious.net halfbakedharvest.com iwashyoudry.com"
+)
 
 # ---------------------------------------------------------------------------
 # VLM configuration (ingredient recognition)

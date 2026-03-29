@@ -1,9 +1,9 @@
 /**
  * Recipe discovery screen - main recipe feed.
- * Shows recipe cards, handles load more, and tracks session state.
+ * Each "Load More" auto-scrolls to the new batch; old batches stay accessible by scrolling up.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { View, Text, Pressable, Modal, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -16,39 +16,48 @@ import useSavedRecipes from '../../src/hooks/useSavedRecipes';
 import RecipeCard from '../../src/components/common/RecipeCard';
 import { RECIPE_BATCH_SIZE } from '../../src/constants/config';
 
-const SURPRISE_INTERVAL = 10;
 const FATIGUE_THRESHOLD = 7;
 
 export default function DiscoverScreen() {
   const router = useRouter();
   const { user } = useAuth();
-  const { session, updateSession, resetSession, getSessionContext } = useSession();
-  const { recipes, loading, error, poolInfo, startPipeline, loadNextBatch, rerank } = useRecipeContext();
+  const { session, resetSession } = useSession();
+  const { recipes, loading, error, poolInfo, loadNextBatch, rerank } = useRecipeContext();
   const { save, remove, isSaved, savedRecipes } = useSavedRecipes();
   const [refreshCount, setRefreshCount] = useState(0);
   const [showFatiguePrompt, setShowFatiguePrompt] = useState(false);
   const [showSavedPanel, setShowSavedPanel] = useState(false);
-  const hasStartedRef = useRef(false);
-
-  // Pipeline is now triggered by session/generating screen.
-  // This screen only displays recipes already loaded by useRecipes.
+  const flatListRef = useRef(null);
 
   const handleStartSession = useCallback(() => {
     resetSession();
-    hasStartedRef.current = false;
     router.push('/session/setup');
   }, [resetSession, router]);
 
   const handleLoadMore = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const prevLength = recipes.length;
     setRefreshCount((c) => {
       const next = c + 1;
-      if (next >= FATIGUE_THRESHOLD && recipes.length > 0) {
-        setShowFatiguePrompt(true);
-      }
+      if (next >= FATIGUE_THRESHOLD && recipes.length > 0) setShowFatiguePrompt(true);
       return next;
     });
     await loadNextBatch();
+    // Scroll to first new card after a short render delay
+    setTimeout(() => {
+      if (flatListRef.current && prevLength > 0) {
+        try {
+          flatListRef.current.scrollToIndex({
+            index: prevLength,
+            animated: true,
+            viewPosition: 0,
+          });
+        } catch {
+          // Index out of range — fallback to scrollToEnd
+          flatListRef.current.scrollToEnd({ animated: true });
+        }
+      }
+    }, 250);
   }, [loadNextBatch, recipes.length]);
 
   const handleSave = useCallback(async (recipe) => {
@@ -66,16 +75,8 @@ export default function DiscoverScreen() {
     router.push('/recipe/' + recipe.id);
   }, [router]);
 
-  const getBadge = useCallback((recipe, index) => {
-    const totalShown = (poolInfo.shownCount - recipes.length) + index;
-    if (totalShown > 0 && totalShown % SURPRISE_INTERVAL === 0) return 'Try Something New';
-    if (recipe.totalTime != null && recipe.totalTime <= 20) return 'Quick';
-    return null;
-  }, [poolInfo.shownCount, recipes.length]);
-
   const hasActiveSession = session.sessionPoolId != null || recipes.length > 0 || loading;
 
-  // Build the list data: skeletons while loading with no recipes, else actual recipes
   const listData = useMemo(() => {
     if (loading && recipes.length === 0) {
       return Array.from({ length: RECIPE_BATCH_SIZE }, (_, i) => ({ id: `sk-${i}`, _skeleton: true }));
@@ -83,23 +84,22 @@ export default function DiscoverScreen() {
     return recipes;
   }, [loading, recipes]);
 
-  const renderItem = useCallback(({ item, index }) => {
+  const renderItem = useCallback(({ item }) => {
     if (item._skeleton) return <RecipeCard loading />;
     return (
       <RecipeCard
         recipe={item}
         isSaved={isSaved(item.id)}
-        badge={getBadge(item, index)}
         onPress={() => handlePress(item)}
         onSave={() => handleSave(item)}
       />
     );
-  }, [isSaved, getBadge, handlePress, handleSave]);
+  }, [isSaved, handlePress, handleSave]);
 
   const ListHeader = useMemo(() => (
     <>
       {error ? (
-        <View className="mb-2 px-0 py-3 bg-red-50 border border-red-200 rounded-xl flex-row items-center gap-2 px-4">
+        <View className="mb-2 py-3 bg-red-50 border border-red-200 rounded-xl flex-row items-center gap-2 px-4">
           <Ionicons name="warning-outline" size={16} color="#DC2626" />
           <Text className="text-sm text-red-600 flex-1">{error}</Text>
         </View>
@@ -116,17 +116,16 @@ export default function DiscoverScreen() {
       {showFatiguePrompt ? (
         <View className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
           <Text className="text-sm font-semibold text-amber-800 mb-1">Having trouble deciding?</Text>
-          <Text className="text-sm text-amber-700 mb-3">Let us help you narrow it down.</Text>
+          <Text className="text-sm text-amber-700 mb-3">Start a new session to refine your search.</Text>
           <Pressable
             onPress={() => { setShowFatiguePrompt(false); handleStartSession(); }}
             className="bg-amber-600 px-4 py-2 rounded-lg self-start"
           >
-            <Text className="text-white text-sm font-semibold">Refine Preferences</Text>
+            <Text className="text-white text-sm font-semibold">Start New Session</Text>
           </Pressable>
         </View>
       ) : null}
     </>
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [error, session.sessionPoolId, session.mealType, session.servingCount, session.occasion, showFatiguePrompt, handleStartSession]);
 
   const ListFooter = useMemo(() => (
@@ -142,16 +141,15 @@ export default function DiscoverScreen() {
           className="py-4 rounded-xl border border-border items-center flex-row justify-center gap-2 active:bg-gray-50"
         >
           <Ionicons name="chevron-down" size={18} color="#64748B" />
-          <Text className="text-sm font-semibold text-text-secondary">Load More Recipes</Text>
+          <Text className="text-sm font-semibold text-text-secondary">More Recipes</Text>
         </Pressable>
       ) : null}
       {poolInfo.poolSize > 0 ? (
         <Text className="text-xs text-text-muted text-center mt-3 pb-2">
-          {poolInfo.shownCount} of {poolInfo.poolSize} recipes shown
+          {poolInfo.shownCount} of {poolInfo.poolSize} shown · more loading in background
         </Text>
       ) : null}
     </>
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [loading, recipes.length, handleLoadMore, poolInfo]);
 
   return (
@@ -183,6 +181,7 @@ export default function DiscoverScreen() {
         <EmptyState onStart={handleStartSession} />
       ) : (
         <FlatList
+          ref={flatListRef}
           data={listData}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
@@ -194,6 +193,10 @@ export default function DiscoverScreen() {
           initialNumToRender={RECIPE_BATCH_SIZE}
           maxToRenderPerBatch={RECIPE_BATCH_SIZE}
           windowSize={5}
+          onScrollToIndexFailed={(info) => {
+            // Fallback: scroll to end if target index isn't rendered yet
+            setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+          }}
         />
       )}
 

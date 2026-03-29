@@ -1,15 +1,18 @@
 """
 Recipe lookup routes.
-Provides individual recipe fetch by ID from the local cache.
+Provides individual recipe fetch by ID from the local cache,
+plus LLM-powered ingredient substitution suggestions.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import RecipeCache
 from app.schemas import RecipeOut
 from app.auth import get_current_user_id
+from app.services import llm_service
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
@@ -29,7 +32,6 @@ async def get_recipe(
 
     return RecipeOut(
         id=recipe.id,
-        spoonacular_id=recipe.spoonacular_id,
         title=recipe.title,
         description=recipe.description or "",
         image=recipe.image or "",
@@ -48,3 +50,29 @@ async def get_recipe(
         instructions=recipe.instructions or [],
         score=0.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM ingredient substitution
+# ---------------------------------------------------------------------------
+
+class SubstitutionRequest(BaseModel):
+    recipe_ingredients: list[str]
+    user_ingredients: list[str] = []
+
+
+@router.post("/{recipe_id}/substitutions")
+async def get_substitutions(
+    recipe_id: str,
+    body: SubstitutionRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Ask the LLM to match recipe ingredients against the user's pantry and
+    suggest substitutions for missing items.
+    """
+    results = await llm_service.suggest_substitutions(
+        recipe_ingredients=body.recipe_ingredients,
+        user_ingredients=body.user_ingredients,
+    )
+    return {"substitutions": results}

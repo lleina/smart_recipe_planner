@@ -56,7 +56,11 @@ export function RecipeProvider({ children }) {
     setError(null);
     try {
       const result = await getNextBatch(session.sessionPoolId);
-      setRecipes((prev) => [...prev, ...result.recipes]);
+      setRecipes((prev) => {
+        const existingIds = new Set(prev.map((r) => r.id));
+        const newRecipes = (result.recipes || []).filter((r) => !existingIds.has(r.id));
+        return [...prev, ...newRecipes];
+      });
       setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount });
       batchAddShownRecipeIds(result.recipes.map((r) => r.id));
     } catch (err) {

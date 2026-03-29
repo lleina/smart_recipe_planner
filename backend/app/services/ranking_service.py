@@ -15,7 +15,7 @@ Rule scorer weights:
   urgency boost:      10 pts  (ingredients with urgency <= 3 days)
   cuisine affinity:   15 pts
   equipment match:    10 pts
-  spoonacular rating:  5 pts
+  recipe rating:       5 pts
 """
 
 import json
@@ -102,7 +102,7 @@ def score_rules(
             i.get("name", "") for i in (recipe.get("ingredients") or [])
         ).lower()
         for restriction in restriction_set:
-            # Crude keyword check; Spoonacular tags cover the common cases
+            # Crude keyword check against ingredient names
             if restriction == "vegan" and "vegan" not in recipe_tags:
                 pass  # not a violation unless we have tag data
             if restriction in ("gluten-free", "gluten_free"):
@@ -152,7 +152,7 @@ def score_rules(
         else:
             score += 5.0 * (len(needed & have) / len(needed))
 
-    # --- Spoonacular rating (0-5 pts) ---
+    # --- Recipe rating (0-5 pts) ---
     rating = recipe.get("rating") or 0.0
     score += min(5.0, (float(rating) / 5.0) * 5.0)
 

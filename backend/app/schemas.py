@@ -108,7 +108,6 @@ class RecommendRequest(BaseModel):
 class RecipeOut(BaseModel):
     model_config = ConfigDict(alias_generator=_camel_case_alias, populate_by_name=True, serialize_by_alias=True)
     id: str
-    spoonacular_id: Optional[str] = None
     title: str
     description: str = ""
     image: str = ""

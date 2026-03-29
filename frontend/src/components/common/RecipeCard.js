@@ -4,7 +4,7 @@
  * Supports skeleton loading state per BR-DSC-07.
  */
 
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { View, Text, Pressable, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { formatMinutes } from '../../utils/time';
@@ -32,11 +32,14 @@ const DIFFICULTY_LABELS = {
  * @param {string} [props.badge] - Optional badge label (e.g., "Quick", "Surprise!").
  */
 function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }) {
+  const [imageError, setImageError] = useState(false);
+
   if (loading) {
     return <RecipeCardSkeleton />;
   }
 
   const difficultyStyle = DIFFICULTY_COLORS[recipe.difficulty] || DIFFICULTY_COLORS.medium;
+  const showImage = recipe.image && !imageError;
 
   return (
     <Pressable
@@ -47,12 +50,13 @@ function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }
     >
       {/* Hero image */}
       <View className="h-48 bg-gray-200 relative">
-        {recipe.image ? (
+        {showImage ? (
           <Image
             source={{ uri: recipe.image }}
             className="w-full h-full"
             resizeMode="cover"
             accessibilityLabel={recipe.title}
+            onError={() => setImageError(true)}
           />
         ) : (
           <View className="flex-1 items-center justify-center">
