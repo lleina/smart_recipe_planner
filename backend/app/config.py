@@ -16,6 +16,12 @@ JWT_REFRESH_EXPIRY_DAYS = 30
 SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY", "")
 SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
 
+# When True, the pipeline always uses hardcoded mock templates instead of
+# calling the Spoonacular API, regardless of whether a key is set.
+# Default: True — you must explicitly opt-in to real API calls.
+# Set USE_MOCK_RECIPES=false in .env only when you want to use real credits.
+USE_MOCK_RECIPES = os.getenv("USE_MOCK_RECIPES", "true").lower() in ("true", "1", "yes")
+
 # ---------------------------------------------------------------------------
 # VLM configuration (ingredient recognition)
 # Recommended local backend: Ollama + qwen3-vl:4b

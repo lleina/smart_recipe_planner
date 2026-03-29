@@ -11,9 +11,9 @@ RecommendRequest, enabling A/B comparison between modes.
 
 Rule scorer weights:
   time fit:           25 pts  (hard filter if > +15 min over budget)
-  ingredient overlap: 30 pts
-  urgency boost:      20 pts  (ingredients with urgency <= 3 days)
-  cuisine affinity:   10 pts
+  ingredient overlap: 35 pts
+  urgency boost:      10 pts  (ingredients with urgency <= 3 days)
+  cuisine affinity:   15 pts
   equipment match:    10 pts
   spoonacular rating:  5 pts
 """
@@ -54,8 +54,10 @@ _HYBRID_LLM_INPUT_SIZE = 15
 _RERANK_SYSTEM_PROMPT = (
     "You are a recipe ranking assistant. "
     "Re-rank the provided recipe candidates from most to least relevant for this user. "
-    "Consider: ingredient availability, perishability urgency, cuisine preference, "
+    "Consider: overall tastiness and appeal, ingredient availability, cuisine preference, "
     "occasion appropriateness, meal variety, and novelty. "
+    "Perishable-ingredient usage is a minor tiebreaker — never rank a less appetising dish "
+    "above a more appealing one solely because it uses an expiring ingredient. "
     "Return ONLY a JSON array of recipe IDs in ranked order (most relevant first). "
     "No explanation, no markdown."
 )
@@ -115,27 +117,28 @@ def score_rules(
                 if any(kw in recipe_ingredients for kw in nut_keywords):
                     return float("-inf")
 
-    # --- Ingredient overlap (0-30 pts) ---
+    # --- Ingredient overlap (0-35 pts) ---
     available_names = {i.name.lower() for i in context.available_ingredients}
     recipe_ingredient_names = {
         i.get("name", "").lower() for i in (recipe.get("ingredients") or [])
     }
     overlap = len(available_names & recipe_ingredient_names)
-    score += min(30.0, overlap * 6.0)
+    score += min(35.0, overlap * 7.0)
 
-    # --- Perishability urgency boost (0-20 pts) ---
+    # --- Perishability urgency boost (0-10 pts) ---
+    # Kept intentionally small so urgency gently nudges rather than dominates.
     urgent_names = {
         i.name.lower() for i in context.available_ingredients
         if i.urgency is not None and i.urgency <= 3
     }
     urgency_overlap = len(urgent_names & recipe_ingredient_names)
-    score += min(20.0, urgency_overlap * 10.0)
+    score += min(10.0, urgency_overlap * 5.0)
 
-    # --- Cuisine affinity (0-10 pts) ---
+    # --- Cuisine affinity (0-15 pts) ---
     if cuisine_preferences:
         recipe_cuisine = (recipe.get("cuisine") or "").lower()
         if any(recipe_cuisine == p.lower() for p in cuisine_preferences):
-            score += 10.0
+            score += 15.0
 
     # --- Equipment match (0-10 pts) ---
     needed_equipment = set(recipe.get("cooking_equipment") or [])

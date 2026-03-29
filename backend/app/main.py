@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-from app.config import CORS_ORIGINS
+from app.config import CORS_ORIGINS, SPOONACULAR_API_KEY, LLM_BASE_URL, VLM_BASE_URL, USE_MOCK_RECIPES
 from app.database import init_db
 from app.routes import (
     auth_routes, user_routes, vlm_routes,
@@ -34,6 +34,41 @@ async def lifespan(application: FastAPI):
     logger.info("Starting up — initializing database")
     await init_db()
     logger.info("Database ready")
+
+    # -----------------------------------------------------------------------
+    # Startup configuration summary — makes it immediately obvious which
+    # external services are live vs. running in mock/fallback mode.
+    # -----------------------------------------------------------------------
+    if not SPOONACULAR_API_KEY:
+        logger.warning(
+            "SPOONACULAR_API_KEY is not set — recipe fetch will use MOCK DATA. "
+            "Ingredients, images, and instructions will be hardcoded templates, not real recipes. "
+            "Set SPOONACULAR_API_KEY in .env to get real recipe data."
+        )
+    elif USE_MOCK_RECIPES:
+        logger.warning(
+            "USE_MOCK_RECIPES=true — Spoonacular key is set but the pipeline will still use "
+            "mock data. Set USE_MOCK_RECIPES=false in .env to enable live recipe fetching. "
+            "Tip: run 'python scripts/seed_cache.py' first to pre-fill the cache cheaply."
+        )
+    else:
+        logger.info("Spoonacular: live mode ✓ (cache-first, key configured)")
+
+    if not LLM_BASE_URL:
+        logger.warning(
+            "LLM_BASE_URL is not set — LLM ideation is DISABLED. "
+            "Recipe suggestions will fall back to generic keyword list."
+        )
+    else:
+        logger.info("LLM: %s at %s ✓", "(see LLM_MODEL)", LLM_BASE_URL)
+
+    if not VLM_BASE_URL:
+        logger.warning(
+            "VLM_BASE_URL is not set — ingredient scanning will use MOCK ingredients."
+        )
+    else:
+        logger.info("VLM: configured at %s ✓", VLM_BASE_URL)
+
     yield
     logger.info("Shutting down")
 

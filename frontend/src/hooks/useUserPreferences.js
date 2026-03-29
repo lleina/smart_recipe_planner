@@ -13,6 +13,8 @@ const PREFS_CACHE_KEY = '@user_preferences';
 const DEFAULT_PREFERENCES = {
   cuisinePreferences: [],
   dietaryRestrictions: [],
+  intolerances: [],
+  diet: null,
   healthGoal: 'none',
   timePreference: 'moderate',
   mealPrep: false,

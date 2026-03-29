@@ -1,12 +1,12 @@
 /**
  * Multi-step onboarding screen.
- * Captures: cuisines, dietary restrictions, health goal, time preference,
+ * Captures: cuisines, diet, intolerances, health goal, time preference,
  * equipment, meal prep, perishable optimization.
  * Completable in under 1 minute (BR-ONB-07).
  */
 
 import { useState, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable } from 'react-native';
+import { View, Text, ScrollView, Pressable, TextInput, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -16,7 +16,8 @@ import Button from '../../src/components/common/Button';
 import Tag from '../../src/components/common/Tag';
 import {
   CUISINE_OPTIONS,
-  DIETARY_RESTRICTIONS,
+  SPOONACULAR_DIETS,
+  INTOLERANCES,
   HEALTH_GOALS,
   TIME_PREFERENCES,
   COOKING_EQUIPMENT,
@@ -27,6 +28,8 @@ const TOTAL_STEPS = 4;
 const DEFAULT_PREFERENCES = {
   cuisinePreferences: [],
   dietaryRestrictions: [],
+  diet: null,
+  intolerances: [],
   customAllergies: '',
   healthGoal: 'none',
   timePreference: 'moderate',
@@ -85,7 +88,13 @@ export default function OnboardingScreen() {
       case 0:
         return <CuisineStep preferences={preferences} onToggle={toggleArrayItem} />;
       case 1:
-        return <DietaryStep preferences={preferences} onToggle={toggleArrayItem} />;
+        return (
+          <DietaryStep
+            preferences={preferences}
+            onToggle={toggleArrayItem}
+            onSetValue={setSingleValue}
+          />
+        );
       case 2:
         return (
           <GoalsStep
@@ -135,6 +144,10 @@ export default function OnboardingScreen() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Step components
+// ---------------------------------------------------------------------------
+
 function CuisineStep({ preferences, onToggle }) {
   return (
     <View className="py-4">
@@ -158,24 +171,90 @@ function CuisineStep({ preferences, onToggle }) {
   );
 }
 
-function DietaryStep({ preferences, onToggle }) {
+function DietaryStep({ preferences, onToggle, onSetValue }) {
+  const [dietQuery, setDietQuery] = useState('');
+  const [intoleranceQuery, setIntoleranceQuery] = useState('');
+
+  const filteredDiets = SPOONACULAR_DIETS.filter((d) =>
+    d.label.toLowerCase().includes(dietQuery.toLowerCase())
+  );
+  const filteredIntolerances = INTOLERANCES.filter((i) =>
+    i.label.toLowerCase().includes(intoleranceQuery.toLowerCase())
+  );
+
   return (
     <View className="py-4">
       <Text className="text-2xl font-bold text-text-primary mb-2">
-        Any dietary restrictions?
+        Dietary preferences
       </Text>
       <Text className="text-base text-text-secondary mb-6">
-        We will never suggest recipes that violate these.
+        We'll make sure every suggestion fits your needs.
       </Text>
-      <View className="flex-row flex-wrap">
-        {DIETARY_RESTRICTIONS.map((item) => (
+
+      {/* --- Diet (single-select) --- */}
+      <Text className="text-base font-semibold text-text-primary mb-2">
+        Diet type
+        {preferences.diet ? (
+          <Text className="text-sm font-normal text-text-muted"> — {
+            SPOONACULAR_DIETS.find((d) => d.id === preferences.diet)?.label
+          }</Text>
+        ) : (
+          <Text className="text-sm font-normal text-text-muted"> — none selected</Text>
+        )}
+      </Text>
+      <TextInput
+        className="border border-border rounded-xl px-4 py-2 mb-3 text-text-primary bg-surface"
+        placeholder="Search diets…"
+        placeholderTextColor="#9CA3AF"
+        value={dietQuery}
+        onChangeText={setDietQuery}
+        clearButtonMode="while-editing"
+      />
+      <View className="flex-row flex-wrap mb-6">
+        {filteredDiets.map((item) => (
           <Tag
             key={item.id}
             label={item.label}
-            selected={preferences.dietaryRestrictions.includes(item.id)}
-            onPress={() => onToggle('dietaryRestrictions', item.id)}
+            selected={preferences.diet === item.id}
+            onPress={() =>
+              onSetValue('diet', preferences.diet === item.id ? null : item.id)
+            }
           />
         ))}
+        {filteredDiets.length === 0 && (
+          <Text className="text-text-muted text-sm">No matching diets</Text>
+        )}
+      </View>
+
+      {/* --- Intolerances (multi-select) --- */}
+      <Text className="text-base font-semibold text-text-primary mb-2">
+        Intolerances / Allergies
+        {preferences.intolerances.length > 0 && (
+          <Text className="text-sm font-normal text-text-muted">
+            {' '}— {preferences.intolerances.length} selected
+          </Text>
+        )}
+      </Text>
+      <TextInput
+        className="border border-border rounded-xl px-4 py-2 mb-3 text-text-primary bg-surface"
+        placeholder="Search intolerances…"
+        placeholderTextColor="#9CA3AF"
+        value={intoleranceQuery}
+        onChangeText={setIntoleranceQuery}
+        clearButtonMode="while-editing"
+      />
+      <View className="flex-row flex-wrap">
+        {filteredIntolerances.map((item) => (
+          <Tag
+            key={item.id}
+            label={item.label}
+            selected={preferences.intolerances.includes(item.id)}
+            onPress={() => onToggle('intolerances', item.id)}
+          />
+        ))}
+        {filteredIntolerances.length === 0 && (
+          <Text className="text-text-muted text-sm">No matching intolerances</Text>
+        )}
       </View>
     </View>
   );
@@ -221,18 +300,39 @@ function GoalsStep({ preferences, onSetValue }) {
 }
 
 function EquipmentStep({ preferences, onToggle, onSetValue }) {
+  const [equipQuery, setEquipQuery] = useState('');
+
+  const filteredEquipment = COOKING_EQUIPMENT.filter((item) =>
+    item.label.toLowerCase().includes(equipQuery.toLowerCase())
+  );
+
   return (
     <View className="py-4">
       <Text className="text-2xl font-bold text-text-primary mb-2">
         Your kitchen setup
       </Text>
-      <Text className="text-base text-text-secondary mb-6">
+      <Text className="text-base text-text-secondary mb-4">
         Optional. Helps us suggest recipes you can actually make.
       </Text>
 
-      <Text className="text-base font-semibold text-text-primary mb-3">Equipment</Text>
+      <Text className="text-base font-semibold text-text-primary mb-2">
+        Equipment
+        {preferences.cookingEquipment.length > 0 && (
+          <Text className="text-sm font-normal text-text-muted">
+            {' '}— {preferences.cookingEquipment.length} selected
+          </Text>
+        )}
+      </Text>
+      <TextInput
+        className="border border-border rounded-xl px-4 py-2 mb-3 text-text-primary bg-surface"
+        placeholder="Search equipment…"
+        placeholderTextColor="#9CA3AF"
+        value={equipQuery}
+        onChangeText={setEquipQuery}
+        clearButtonMode="while-editing"
+      />
       <View className="flex-row flex-wrap mb-6">
-        {COOKING_EQUIPMENT.map((item) => (
+        {filteredEquipment.map((item) => (
           <Tag
             key={item.id}
             label={item.label}
@@ -240,6 +340,9 @@ function EquipmentStep({ preferences, onToggle, onSetValue }) {
             onPress={() => onToggle('cookingEquipment', item.id)}
           />
         ))}
+        {filteredEquipment.length === 0 && (
+          <Text className="text-text-muted text-sm">No matching equipment</Text>
+        )}
       </View>
 
       <Pressable

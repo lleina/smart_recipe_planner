@@ -44,6 +44,8 @@ async def get_preferences(
         time_preference=prefs.time_preference or "moderate",
         meal_prep=prefs.meal_prep or False,
         cooking_equipment=prefs.cooking_equipment or [],
+        intolerances=prefs.intolerances or [],
+        diet=prefs.diet,
         perishable_optimization=prefs.perishable_optimization
         if prefs.perishable_optimization is not None else True,
         updated_at=prefs.updated_at,
@@ -79,6 +81,8 @@ async def update_preferences(
         time_preference=prefs.time_preference or "moderate",
         meal_prep=prefs.meal_prep or False,
         cooking_equipment=prefs.cooking_equipment or [],
+        intolerances=prefs.intolerances or [],
+        diet=prefs.diet,
         perishable_optimization=prefs.perishable_optimization
         if prefs.perishable_optimization is not None else True,
         updated_at=prefs.updated_at,

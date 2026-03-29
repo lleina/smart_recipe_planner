@@ -50,9 +50,18 @@ def _fix_truncated_json_array(raw: str) -> str:
 _IDEATION_COUNT = 40
 
 _SYSTEM_PROMPT = (
-    "You are a recipe ideation assistant. "
-    "Given a user's available ingredients, dietary restrictions, meal type, "
-    "and time budget, suggest recipe ideas they can actually make. "
+    "You are a recipe ideation assistant for an app whose goal is to get people "
+    "genuinely excited about cooking at home. "
+    "Every suggestion must be a real, crave-worthy dish — the kind of food someone "
+    "would be delighted to eat, not just willing to make. "
+    "Taste and culinary appeal are the highest priority. "
+    "Never force unusual ingredient pairings just because an ingredient is available. "
+    "When the user has ingredients that are about to expire, treat them as an opportunity: "
+    "roughly 40% of your suggestions should be dishes where those expiring ingredients "
+    "play a central, delicious role — not a minor addition. "
+    "The remaining suggestions should focus on variety and the best possible dishes "
+    "from everything available. "
+    "Every dish must be a recognisable, culinarily coherent recipe. "
     "Output ONLY a valid JSON array. No markdown, no explanation."
 )
 
@@ -102,7 +111,10 @@ def _build_user_prompt(
         "For each return a JSON object with: "
         "\"name\" (string), \"key_ingredients\" (list of 3-5 strings), "
         "\"cuisine\" (string), \"estimated_time\" (integer minutes). "
-        "Prioritize recipes that use the URGENT ingredients. "
+        "Focus on well-known, genuinely tasty dishes. "
+        "Where it makes natural culinary sense, some recipes may incorporate the urgent ingredients — "
+        "but never sacrifice taste or create an unrecognisable dish just to use them. "
+        "Suggest a variety of cuisines and styles. "
         "Ensure every suggestion respects the dietary restrictions. "
         "Return ONLY a JSON array."
     )
@@ -160,7 +172,7 @@ async def _call_llm(
         think=False,
     )
 
-    logger.debug("LLM raw response (first 500 chars): %s", raw_text[:500])
+    logger.info("LLM raw response (first 800 chars):\n%s", raw_text[:800])
     clean = _extract_json(raw_text)
     if not clean.strip():
         raise ValueError("LLM returned empty content after extraction")
@@ -182,6 +194,18 @@ async def _call_llm(
             "cuisine": str(s.get("cuisine", "")),
             "estimated_time": int(raw_time),
         })
+
+    # Log every suggestion so the pipeline is fully traceable in the console
+    logger.info("LLM ideation produced %d suggestions:", len(result))
+    for i, r in enumerate(result, 1):
+        logger.info(
+            "  %2d. %-45s | %-18s | %3d min | ingredients: %s",
+            i,
+            r["name"],
+            r["cuisine"],
+            r["estimated_time"],
+            ", ".join(r["key_ingredients"]),
+        )
     return result
 
 

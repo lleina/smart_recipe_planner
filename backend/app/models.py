@@ -40,6 +40,8 @@ class UserPreferences(Base):
     time_preference = Column(String, default="moderate")
     meal_prep = Column(Boolean, default=False)
     cooking_equipment = Column(JSON, default=list)
+    intolerances = Column(JSON, default=list)
+    diet = Column(String, default=None, nullable=True)
     perishable_optimization = Column(Boolean, default=True)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

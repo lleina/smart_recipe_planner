@@ -25,8 +25,8 @@ from app.schemas import (
     SessionContextRequest, RecommendResponse, NextBatchResponse,
     RerankResponse, RecipeOut,
 )
-from app.services import llm_service, ranking_service
-from app.config import RANKING_MODE
+from app.services import llm_service, ranking_service, spoonacular_client
+from app.config import RANKING_MODE, SPOONACULAR_API_KEY, USE_MOCK_RECIPES
 
 BATCH_SIZE = 5
 
@@ -47,6 +47,8 @@ async def run_pipeline(
     dietary_restrictions = list(preferences.dietary_restrictions or []) if preferences else []
     cuisine_preferences = list(preferences.cuisine_preferences or []) if preferences else []
     cooking_equipment = list(preferences.cooking_equipment or []) if preferences else []
+    intolerances = list(preferences.intolerances or []) if preferences else []
+    diet = (preferences.diet or None) if preferences else None
     health_goal = (preferences.health_goal or "none") if preferences else "none"
     history_titles = [h.recipe_id for h in history[:10]]
 
@@ -63,9 +65,19 @@ async def run_pipeline(
         history_titles=history_titles,
     )
 
-    # Stage 3: Recipe fetch (mock stand-in for Spoonacular)
-    logger.info("[%s] Stage 3: fetching %d recipe details", user_id[:8], len(suggestions))
-    recipes_raw = _fetch_recipes(suggestions, session_context)
+    # Stage 3: Recipe fetch (cache-first Spoonacular or mock fallback)
+    logger.info(
+        "[%s] Stage 3: fetching %d recipes (mode=%s)",
+        user_id[:8], len(suggestions),
+        "MOCK" if (USE_MOCK_RECIPES or not SPOONACULAR_API_KEY) else "SPOONACULAR",
+    )
+    recipes_raw = await _fetch_recipes(
+        suggestions, session_context, db,
+        cuisine_preferences=cuisine_preferences,
+        diet=diet,
+        intolerances=intolerances,
+        cooking_equipment=cooking_equipment,
+    )
 
     # Stage 4: Ranking
     effective_mode = ranking_mode_override or RANKING_MODE
@@ -136,6 +148,19 @@ async def run_pipeline(
 
     await db.commit()
     await db.refresh(pool)
+
+    # Log the final ranked order so you can compare LLM suggestions → final cards
+    credits = spoonacular_client.get_credits_used()
+    if credits > 0:
+        logger.info("[%s] Spoonacular credits used this session: ~%d", user_id[:8], credits)
+    logger.info("[%s] Stage 4 → final ranking (%d recipes):", user_id[:8], len(ranked))
+    for pos, r in enumerate(ranked, 1):
+        score_str = f"{r.get('score', 0):.1f}"
+        ingr_names = ", ".join(i.get("name", "") for i in (r.get("ingredients") or [])[:4])
+        logger.info(
+            "  %2d. %-45s | score=%s | cuisine=%-14s | ingredients: %s",
+            pos, r.get("title", "?"), score_str, r.get("cuisine", ""), ingr_names,
+        )
 
     logger.info("[%s] Stage 5: pool %s created — %d recipes, serving first %d",
                 user_id[:8], pool_id[:8], len(ranked), min(BATCH_SIZE, len(ranked)))
@@ -208,11 +233,83 @@ async def rerank_pool(
     )
 
 
-def _fetch_recipes(suggestions: list[dict], ctx: SessionContextRequest) -> list[dict]:
+async def _fetch_recipes(
+    suggestions: list[dict],
+    ctx: SessionContextRequest,
+    db: AsyncSession,
+    cuisine_preferences: list[str] | None = None,
+    diet: str | None = None,
+    intolerances: list[str] | None = None,
+    cooking_equipment: list[str] | None = None,
+) -> list[dict]:
     """
-    Maps LLM suggestions to recipe dicts.
-    Replaces mock titles/cuisine with the LLM suggestion.
-    When Spoonacular is integrated, this queries the API instead.
+    Stage 3 dispatch:
+    - USE_MOCK_RECIPES=true (default) or no key → fast mock templates, 0 credits.
+    - USE_MOCK_RECIPES=false + key present  → cache-first Spoonacular lookup.
+    """
+    if USE_MOCK_RECIPES or not SPOONACULAR_API_KEY:
+        return _fetch_recipes_mock(suggestions, ctx)
+    return await _fetch_recipes_spoonacular(
+        suggestions, ctx, db,
+        cuisine_preferences=cuisine_preferences,
+        diet=diet,
+        intolerances=intolerances,
+        cooking_equipment=cooking_equipment,
+    )
+
+
+async def _fetch_recipes_spoonacular(
+    suggestions: list[dict],
+    ctx: SessionContextRequest,
+    db: AsyncSession,
+    cuisine_preferences: list[str] | None = None,
+    diet: str | None = None,
+    intolerances: list[str] | None = None,
+    cooking_equipment: list[str] | None = None,
+) -> list[dict]:
+    """
+    Cache-first Spoonacular fetch.
+    For each LLM suggestion:
+      1. Check RecipeCache by title similarity — free.
+      2. On cache miss, call Spoonacular — costs ~2 credits.
+    Suggestions that cannot be resolved are silently dropped.
+    """
+    results = []
+    for suggestion in suggestions:
+        try:
+            recipe = await spoonacular_client.find_recipe(
+                suggestion_name=suggestion.get("name", ""),
+                key_ingredients=suggestion.get("key_ingredients", []),
+                db=db,
+                cuisine_preferences=cuisine_preferences,
+                diet=diet,
+                intolerances=intolerances,
+                equipment=cooking_equipment,
+            )
+            if recipe:
+                # Keep LLM time estimate; Spoonacular's can be inaccurate
+                if suggestion.get("estimated_time"):
+                    recipe["total_time"] = suggestion["estimated_time"]
+                recipe["meal_type"] = [ctx.meal_type]
+                results.append(recipe)
+        except Exception as exc:
+            logger.warning("Spoonacular lookup failed for '%s': %s", suggestion.get("name"), exc)
+    logger.info(
+        "Spoonacular fetch complete: %d/%d suggestions resolved",
+        len(results), len(suggestions),
+    )
+    return results
+
+
+def _fetch_recipes_mock(
+    suggestions: list[dict],
+    ctx: SessionContextRequest,
+) -> list[dict]:
+    """
+    Mock recipe fetch: zero API calls, zero credits.
+    Uses hardcoded templates as skeletons but substitutes the LLM's
+    suggestion name, cuisine, time, and key_ingredients so the ranker
+    scores against real pantry data rather than hardcoded mock ingredients.
     """
     result = []
     for i, suggestion in enumerate(suggestions):
@@ -224,6 +321,17 @@ def _fetch_recipes(suggestions: list[dict], ctx: SessionContextRequest) -> list[
         base["cuisine"] = suggestion.get("cuisine", base["cuisine"])
         base["total_time"] = suggestion.get("estimated_time", base["total_time"])
         base["meal_type"] = [ctx.meal_type]
+
+        # --- KEY FIX: use the LLM's key_ingredients for scoring, not the mock
+        # template's ingredients. Without this, the ranker compares mock salmon/
+        # pasta/etc. against the user's actual pantry and produces nonsense scores.
+        key_ingr = suggestion.get("key_ingredients", [])
+        if key_ingr:
+            base["ingredients"] = [
+                {"name": name.lower().strip(), "quantity": 1, "unit": "as needed"}
+                for name in key_ingr
+            ]
+
         result.append(base)
     return result
 

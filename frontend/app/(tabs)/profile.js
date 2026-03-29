@@ -8,14 +8,15 @@ import { View, Text, ScrollView, Pressable, Alert, ActivityIndicator } from 'rea
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as SecureStore from 'expo-secure-store';
-import AsyncStorage from'@react-native-async-storage/async-storage';
 import { useAuth } from '../../src/context/AuthContext';
 import { useSession } from '../../src/context/SessionContext';
+import { useRecipeContext } from '../../src/context/RecipeContext';
+import { clearAllPersistedData } from '../../src/services/storageService';
 
 export default function ProfileScreen() {
   const { user, logout } = useAuth();
   const { resetSession } = useSession();
+  const { resetRecipes } = useRecipeContext();
   const router = useRouter();
   const [showDevMode, setShowDevMode] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -111,17 +112,13 @@ export default function ProfileScreen() {
                         onPress: async () => {
                           setClearing(true);
                           try {
-                            // Clear AsyncStorage keys individually (iOS blocks .clear())
-                            const allKeys = await AsyncStorage.getAllKeys();
-                            if (allKeys.length > 0) {
-                              await AsyncStorage.multiRemove(allKeys);
-                            }
-                            // Clear SecureStore + onboarding flag
-                            await SecureStore.deleteItemAsync('onboarded');
+                            // Clear all persisted data (AsyncStorage + SecureStore)
+                            await clearAllPersistedData();
+                            // Reset all in-memory React state
+                            resetRecipes();
                             resetSession();
-                            // logout() clears tokens + resets auth state
                             await logout();
-                            // Navigate to welcome screen immediately
+                            // Navigate to welcome screen as a fresh user
                             router.replace('/(auth)/welcome');
                           } catch (error) {
                             setClearing(false);

@@ -47,6 +47,8 @@ class PreferencesUpdate(BaseModel):
     time_preference: Optional[str] = None
     meal_prep: Optional[bool] = None
     cooking_equipment: Optional[list[str]] = None
+    intolerances: Optional[list[str]] = None
+    diet: Optional[str] = None
     perishable_optimization: Optional[bool] = None
 
 
@@ -58,6 +60,8 @@ class PreferencesResponse(BaseModel):
     time_preference: str
     meal_prep: bool
     cooking_equipment: list[str]
+    intolerances: list[str] = []
+    diet: Optional[str] = None
     perishable_optimization: bool
     updated_at: datetime
 
