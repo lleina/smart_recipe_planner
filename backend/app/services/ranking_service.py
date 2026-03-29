@@ -140,7 +140,7 @@ def score_rules(
         if any(recipe_cuisine == p.lower() for p in cuisine_preferences):
             score += 15.0
 
-    # --- Equipment match (0-10 pts) ---
+    # --- Equipment match (hard penalty when user is missing required equipment) ---
     needed_equipment = set(recipe.get("cooking_equipment") or [])
     if not needed_equipment:
         score += 10.0  # no special equipment needed = full points
@@ -150,7 +150,18 @@ def score_rules(
         if needed.issubset(have):
             score += 10.0
         else:
-            score += 5.0 * (len(needed & have) / len(needed))
+            missing = needed - have
+            # Major equipment mismatch = hard filter out
+            major_equipment = {"oven", "grill", "bbq", "air fryer", "instant pot",
+                               "slow cooker", "pressure cooker", "smoker", "wok",
+                               "deep fryer", "blender", "food processor"}
+            missing_major = missing & major_equipment
+            if missing_major:
+                logger.debug("Hard-filter: recipe '%s' needs %s which user lacks",
+                             recipe.get("title", ""), missing_major)
+                return float("-inf")
+            # Minor equipment missing (e.g. whisk, spatula) — penalty but not exclusion
+            score -= 10.0 * (len(missing) / len(needed))
 
     # --- Recipe rating (0-5 pts) ---
     rating = recipe.get("rating") or 0.0

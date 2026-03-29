@@ -6,38 +6,30 @@ import { get, put } from './api';
 
 /**
  * Fetches the current user's profile.
- * @param {string} userId
- * @returns {Promise<object>} User profile data.
+ * Auth is handled via JWT — no need to pass userId in the URL.
  */
-export const getProfile = async (userId) => {
-  return get(`/user/${encodeURIComponent(userId)}/profile`);
+export const getProfile = async () => {
+  return get('/user/profile');
 };
 
 /**
  * Updates the current user's profile.
- * @param {string} userId
- * @param {object} profileData
- * @returns {Promise<object>} Updated profile.
  */
-export const updateProfile = async (userId, profileData) => {
-  return put(`/user/${encodeURIComponent(userId)}/profile`, profileData);
+export const updateProfile = async (profileData) => {
+  return put('/user/profile', profileData);
 };
 
 /**
  * Fetches the current user's preferences.
- * @param {string} userId
- * @returns {Promise<object>} User preferences.
  */
-export const getPreferences = async (userId) => {
-  return get(`/user/${encodeURIComponent(userId)}/preferences`);
+export const getPreferences = async () => {
+  return get('/user/preferences');
 };
 
 /**
  * Updates the current user's preferences.
- * @param {string} userId
- * @param {object} preferences
- * @returns {Promise<object>} Updated preferences.
+ * @param {object} preferences - camelCase preference keys (e.g. cuisinePreferences)
  */
-export const updatePreferences = async (userId, preferences) => {
-  return put(`/user/${encodeURIComponent(userId)}/preferences`, preferences);
+export const updatePreferences = async (preferences) => {
+  return put('/user/preferences', preferences);
 };

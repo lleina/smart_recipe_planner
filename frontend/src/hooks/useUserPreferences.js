@@ -39,7 +39,7 @@ export default function useUserPreferences() {
       const cached = await AsyncStorage.getItem(PREFS_CACHE_KEY);
       if (cached) setPreferences(JSON.parse(cached));
 
-      const remote = await getPreferences(user.id);
+      const remote = await getPreferences();
       setPreferences(remote);
       await AsyncStorage.setItem(PREFS_CACHE_KEY, JSON.stringify(remote));
     } catch (err) {
@@ -57,7 +57,7 @@ export default function useUserPreferences() {
       await AsyncStorage.setItem(PREFS_CACHE_KEY, JSON.stringify(merged));
 
       if (user?.id) {
-        await updatePreferences(user.id, merged);
+        await updatePreferences(merged);
       }
     } catch (err) {
       setError(err.message || 'Failed to save preferences');

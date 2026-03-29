@@ -13,22 +13,28 @@ export default function useHistory() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    if (user?.id) loadHistory();
-  }, [user?.id]);
-
-  const loadHistory = async () => {
+  const loadHistory = useCallback(async () => {
+    if (!user?.id) return;
+    let cancelled = false;
     setLoading(true);
     setError(null);
     try {
       const data = await getHistory(user.id);
-      setHistory(data);
+      if (!cancelled) setHistory(data);
     } catch (err) {
-      setError(err.message || 'Failed to load history');
+      // AbortError means logout cleared this request — silently ignore
+      if (!cancelled && err?.name !== 'AbortError' && err?.code !== 'ERR_TIMEOUT') {
+        setError(err.message || 'Failed to load history');
+      }
     } finally {
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     }
-  };
+    return () => { cancelled = true; };
+  }, [user?.id]);
+
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
 
   const addEntry = useCallback(async (recipeId, mealType, servingCount, sessionId) => {
     if (!user?.id) return;

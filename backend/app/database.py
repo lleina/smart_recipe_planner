@@ -40,3 +40,11 @@ async def _migrate(conn):
         await conn.execute(
             text("ALTER TABLE user_preferences ADD COLUMN diet VARCHAR DEFAULT NULL")
         )
+
+    result2 = await conn.execute(text("PRAGMA table_info(session_pool)"))
+    sp_columns = {row[1] for row in result2.fetchall()}
+
+    if "session_context" not in sp_columns:
+        await conn.execute(
+            text("ALTER TABLE session_pool ADD COLUMN session_context JSON DEFAULT NULL")
+        )

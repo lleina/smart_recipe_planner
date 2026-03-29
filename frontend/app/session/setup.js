@@ -4,8 +4,8 @@
  * Completable in under 30 seconds (BR-CTX-06).
  */
 
-import { useState } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput, ActivityIndicator } from 'react-native';
+import { useState, useRef } from 'react';
+import { View, Text, ScrollView, Pressable, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -34,6 +34,8 @@ export default function SessionSetupScreen() {
   const vlm = useVlm({ ensureRegistered });
   const [showAdvancedTime, setShowAdvancedTime] = useState(false);
   const [manualIngredient, setManualIngredient] = useState('');
+  const scrollRef = useRef(null);
+  const manualInputRef = useRef(null);
 
   const handleAddManual = () => {
     const name = manualIngredient.trim();
@@ -80,6 +82,11 @@ export default function SessionSetupScreen() {
   };
 
   return (
+    <KeyboardAvoidingView
+      className="flex-1"
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={0}
+    >
     <SafeAreaView className="flex-1 bg-background">
       <View className="px-6 pt-4 pb-2 flex-row items-center">
         <Pressable onPress={() => router.back()} className="mr-4" accessibilityLabel="Go back">
@@ -88,7 +95,12 @@ export default function SessionSetupScreen() {
         <Text className="text-2xl font-bold text-text-primary">New Session</Text>
       </View>
 
-      <ScrollView className="flex-1 px-6" showsVerticalScrollIndicator={false}>
+      <ScrollView
+        ref={scrollRef}
+        className="flex-1 px-6"
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
 
         {/* Meal Type */}
         <View className="py-4">
@@ -296,9 +308,14 @@ export default function SessionSetupScreen() {
           {/* Manual add */}
           <View className="flex-row gap-2">
             <TextInput
+              ref={manualInputRef}
               value={manualIngredient}
               onChangeText={setManualIngredient}
               onSubmitEditing={handleAddManual}
+              onFocus={() => {
+                // Delay to let keyboard fully open before scrolling
+                setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 350);
+              }}
               placeholder="Add ingredient manually..."
               placeholderTextColor="#94A3B8"
               className="flex-1 border border-border rounded-xl px-4 py-3 text-sm text-text-primary bg-surface"
@@ -322,6 +339,7 @@ export default function SessionSetupScreen() {
         <Button title="Find Recipes" onPress={handleStartDiscovery} />
       </View>
     </SafeAreaView>
+    </KeyboardAvoidingView>
   );
 }
 

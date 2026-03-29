@@ -7,6 +7,8 @@
 import { View, Text, FlatList, Pressable, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { useCallback } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import useHistory from '../../src/hooks/useHistory';
 import Skeleton from '../../src/components/common/Skeleton';
@@ -22,8 +24,15 @@ const MEAL_LABELS = {
 };
 
 export default function HistoryScreen() {
-  const { history, loading, removeEntry } = useHistory();
+  const { history, loading, removeEntry, reload } = useHistory();
   const router = useRouter();
+
+  // Reload whenever this tab comes into focus so newly cooked recipes appear immediately
+  useFocusEffect(
+    useCallback(() => {
+      reload();
+    }, [reload])
+  );
 
   if (loading) {
     return (

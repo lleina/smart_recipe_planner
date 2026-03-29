@@ -52,7 +52,7 @@ export default function useRecipes() {
     setError(null);
     try {
       const result = await getNextBatch(session.sessionPoolId);
-      setRecipes(result.recipes);
+      setRecipes((prev) => [...prev, ...result.recipes]);
       setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount });
       batchAddShownRecipeIds(result.recipes.map((r) => r.id));
     } catch (err) {

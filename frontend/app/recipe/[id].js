@@ -11,7 +11,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, ScrollView, Pressable, Image, TextInput, Modal, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../../src/context/AuthContext';
@@ -27,6 +27,55 @@ import Stepper from '../../src/components/common/Stepper';
 const DIFFICULTY_LABEL = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
 
 // ---------------------------------------------------------------------------
+// Common pantry staples — assumed to be available in any home kitchen.
+// These are highlighted green even when not in the user's scanned ingredients.
+// ---------------------------------------------------------------------------
+const PANTRY_STAPLES = new Set([
+  // salt
+  'salt', 'sea salt', 'kosher salt', 'table salt', 'coarse salt', 'fine salt',
+  // pepper
+  'black pepper',
+  // sugar
+  'sugar', 
+  // oils
+  'oil',
+  'garlic powder',
+  'onion powder',
+  'cinnamon',
+  // vinegar
+  'vinegar', 
+  'ketchup',
+  // 'white vinegar', 'apple cider vinegar', 'distilled white vinegar',
+  // 'red wine vinegar',
+  // water
+  'water'
+  // other near-universals most kitchens have
+  // 'salt and pepper', 'salt & pepper',
+]);
+
+// Ingredients that are genuinely in every kitchen
+// (NOT butter, milk, eggs, honey — not everyone has these)
+
+// Keyword-based fallback: ingredient names ending in a staple word
+// Deliberately conservative — only the most truly universal items
+const _STAPLE_ENDING = new Set([
+  'salt', 'pepper', 'sugar', 'oil', 'vinegar', 'flour', 'starch', 'water',
+]);
+
+function isPantryStaple(name) {
+  const key = name
+    .toLowerCase()
+    .trim()
+    // strip leading helper words that don't change the ingredient
+    .replace(/^(fresh|freshly|finely|coarsely|roughly|lightly|optionally|to taste|a pinch of|pinch of)\s+/, '')
+    .trim();
+  if (PANTRY_STAPLES.has(key)) return true;
+  // e.g. "kosher salt", "olive oil", "dark brown sugar" — last word is a staple keyword
+  const lastWord = key.split(' ').pop();
+  return _STAPLE_ENDING.has(lastWord);
+}
+
+// ---------------------------------------------------------------------------
 // Quick local fallback while LLM substitutions are loading
 // ---------------------------------------------------------------------------
 function quickIngredientMatch(recipeName, availableNames) {
@@ -37,8 +86,10 @@ function quickIngredientMatch(recipeName, availableNames) {
     ''
   );
   if (availableNames.has(stripped)) return true;
+  // Conservative: only match when one name STARTS WITH the other
+  // (catches "chicken" → "chicken breast", but NOT "butter" → "peanut butter")
   for (const avail of availableNames) {
-    if (stripped.includes(avail) || avail.includes(stripped)) return true;
+    if (stripped.startsWith(avail + ' ') || avail.startsWith(stripped + ' ')) return true;
   }
   return false;
 }
@@ -199,20 +250,26 @@ export default function RecipeDetailScreen() {
 
   // Pre-compute ingredient status for each recipe ingredient.
   // Uses LLM results when available; falls back to quick local matching.
+  // Pantry staples are always "have it" regardless of scanned ingredients.
   const ingredientStatus = (recipe?.ingredients || []).map((ing) => {
     const name = (ing.name || '').trim();
     const nameKey = name.toLowerCase().trim();
 
+    // Pantry staples (salt, pepper, oil, sugar…) — assumed always on hand
+    if (isPantryStaple(name)) {
+      return { haveIt: true, substitution: null, isPantry: true };
+    }
     // LLM results take priority
     if (llmSubs && llmSubs[nameKey]) {
       return {
         haveIt: llmSubs[nameKey].have,
         substitution: llmSubs[nameKey].substitution,
+        isPantry: false,
       };
     }
     // Fallback: simple local match (no substitution suggestions)
     const haveIt = quickIngredientMatch(name, availableNames);
-    return { haveIt, substitution: null };
+    return { haveIt, substitution: null, isPantry: false };
   });
 
   if (loading) {
@@ -249,6 +306,22 @@ export default function RecipeDetailScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={['bottom']}>
+      {/* Override header: reliable explicit back button that always works */}
+      <Stack.Screen
+        options={{
+          headerLeft: () => (
+            <Pressable
+              onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/discover'))}
+              hitSlop={16}
+              style={{ paddingHorizontal: 4 }}
+            >
+              <Ionicons name="chevron-back" size={28} color="#1E293B" />
+            </Pressable>
+          ),
+          headerTitle: '',
+          headerShadowVisible: false,
+        }}
+      />
       <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
 
         {/* Hero image */}
@@ -268,13 +341,6 @@ export default function RecipeDetailScreen() {
               </View>
             )}
           </View>
-          <Pressable
-            onPress={() => router.back()}
-            className="absolute top-4 left-4 w-10 h-10 bg-white/90 rounded-full items-center justify-center"
-            accessibilityLabel="Go back"
-          >
-            <Ionicons name="arrow-back" size={20} color="#1E293B" />
-          </Pressable>
           <Pressable
             onPress={handleSaveToggle}
             className="absolute top-4 right-4 w-10 h-10 bg-white/90 rounded-full items-center justify-center"
@@ -328,7 +394,7 @@ export default function RecipeDetailScreen() {
             </View>
             <View className="flex-1 items-center py-3 border-r border-border">
               <Ionicons name="people-outline" size={18} color="#64748B" />
-              <Text className="text-sm font-bold text-text-primary mt-1">{recipe.servings || 4}</Text>
+              <Text className="text-sm font-bold text-text-primary mt-1">{servings || recipe.servings || 4}</Text>
               <Text className="text-xs text-text-muted">Serves</Text>
             </View>
             {recipe.rating > 0 ? (
@@ -372,7 +438,7 @@ export default function RecipeDetailScreen() {
             <Text className="text-sm text-text-muted">No ingredients available.</Text>
           ) : (
             recipe.ingredients.map((ing, i) => {
-              const { haveIt, substitution } = ingredientStatus[i] || {};
+              const { haveIt, substitution, isPantry } = ingredientStatus[i] || {};
               const qty = scaledQty(ing.quantity, recipe.servings);
               const qtyStr = formatQuantity(qty);
               const unitStr = ing.unit && ing.unit !== 'as needed' ? ing.unit : '';
@@ -404,7 +470,11 @@ export default function RecipeDetailScreen() {
                       <Text className="text-text-primary">{nameStr}</Text>
                     </Text>
                     {/* Status label */}
-                    {haveIt ? (
+                    {haveIt && isPantry ? (
+                      <View className="ml-2 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">
+                        <Text className="text-xs text-green-600 font-semibold">Pantry ✓</Text>
+                      </View>
+                    ) : haveIt ? (
                       <View className="ml-2 bg-green-100 px-2 py-0.5 rounded-full">
                         <Text className="text-xs text-green-700 font-semibold">Have it</Text>
                       </View>
@@ -438,9 +508,18 @@ export default function RecipeDetailScreen() {
         {/* Instructions */}
         <View className="px-6 py-4 border-b border-border">
           <Text className="text-lg font-bold text-text-primary mb-1">Instructions</Text>
-          <Text className="text-xs text-text-muted mb-4">
+          <Text className="text-xs text-text-muted mb-1">
             {(recipe.instructions || []).length} steps
           </Text>
+          {servings && recipe.servings && servings !== recipe.servings ? (
+            <View className="flex-row items-center gap-1 mb-3 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+              <Ionicons name="information-circle-outline" size={14} color="#2563EB" />
+              <Text className="text-xs text-blue-700">
+                Quantities in steps are written for {recipe.servings} servings — you scaled to {servings}.
+                Adjust measurements proportionally ({servings > recipe.servings ? '×' : '÷'}{Math.abs(Math.round((servings / recipe.servings) * 10) / 10)})
+              </Text>
+            </View>
+          ) : <View className="mb-3" />}
           {(recipe.instructions || []).length === 0 ? (
             <Text className="text-sm text-text-muted">No instructions available.</Text>
           ) : (

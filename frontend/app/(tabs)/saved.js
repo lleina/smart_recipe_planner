@@ -6,14 +6,23 @@
 import { View, Text, FlatList, Pressable, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { useCallback } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import useSavedRecipes from '../../src/hooks/useSavedRecipes';
 import Skeleton from '../../src/components/common/Skeleton';
 import { formatMinutes } from '../../src/utils/time';
 
 export default function SavedScreen() {
-  const { savedRecipes, loading, remove } = useSavedRecipes();
+  const { savedRecipes, loading, remove, reload } = useSavedRecipes();
   const router = useRouter();
+
+  // Reload whenever this tab comes into focus so bookmarks from other screens appear immediately
+  useFocusEffect(
+    useCallback(() => {
+      reload();
+    }, [reload])
+  );
 
   if (loading) {
     return (

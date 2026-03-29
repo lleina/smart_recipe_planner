@@ -13,22 +13,28 @@ export default function useSavedRecipes() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    if (user?.id) loadSaved();
-  }, [user?.id]);
-
-  const loadSaved = async () => {
+  const loadSaved = useCallback(async () => {
+    if (!user?.id || user?.localOnly) return;
+    let cancelled = false;
     setLoading(true);
     setError(null);
     try {
       const data = await getSavedRecipes(user.id);
-      setSavedRecipes(data);
+      if (!cancelled) setSavedRecipes(data);
     } catch (err) {
-      setError(err.message || 'Failed to load saved recipes');
+      // AbortError means logout cleared this request — silently ignore
+      if (!cancelled && err?.name !== 'AbortError' && err?.code !== 'ERR_TIMEOUT') {
+        setError(err.message || 'Failed to load saved recipes');
+      }
     } finally {
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     }
-  };
+    return () => { cancelled = true; };
+  }, [user?.id, user?.localOnly]);  
+
+  useEffect(() => {
+    loadSaved();
+  }, [loadSaved]);
 
   const save = useCallback(async (recipeId, sessionId) => {
     if (!user?.id) return;

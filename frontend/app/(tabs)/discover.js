@@ -1,6 +1,7 @@
 /**
  * Recipe discovery screen - main recipe feed.
- * Each "Load More" auto-scrolls to the new batch; old batches stay accessible by scrolling up.
+ * Full-card vertical scroll. Auto-loads next batch when user is near the
+ * bottom of the list so recipes appear unlimited within a session.
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
@@ -10,7 +11,6 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useSession } from '../../src/context/SessionContext';
-import { useAuth } from '../../src/context/AuthContext';
 import { useRecipeContext } from '../../src/context/RecipeContext';
 import useSavedRecipes from '../../src/hooks/useSavedRecipes';
 import RecipeCard from '../../src/components/common/RecipeCard';
@@ -20,7 +20,6 @@ const FATIGUE_THRESHOLD = 7;
 
 export default function DiscoverScreen() {
   const router = useRouter();
-  const { user } = useAuth();
   const { session, resetSession } = useSession();
   const { recipes, loading, error, poolInfo, loadNextBatch, rerank } = useRecipeContext();
   const { save, remove, isSaved, savedRecipes } = useSavedRecipes();
@@ -35,30 +34,16 @@ export default function DiscoverScreen() {
   }, [resetSession, router]);
 
   const handleLoadMore = useCallback(async () => {
+    // Guard: only load more within an active session
+    if (loading || !session.sessionPoolId) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const prevLength = recipes.length;
     setRefreshCount((c) => {
       const next = c + 1;
       if (next >= FATIGUE_THRESHOLD && recipes.length > 0) setShowFatiguePrompt(true);
       return next;
     });
     await loadNextBatch();
-    // Scroll to first new card after a short render delay
-    setTimeout(() => {
-      if (flatListRef.current && prevLength > 0) {
-        try {
-          flatListRef.current.scrollToIndex({
-            index: prevLength,
-            animated: true,
-            viewPosition: 0,
-          });
-        } catch {
-          // Index out of range — fallback to scrollToEnd
-          flatListRef.current.scrollToEnd({ animated: true });
-        }
-      }
-    }, 250);
-  }, [loadNextBatch, recipes.length]);
+  }, [loadNextBatch, loading, recipes.length, session.sessionPoolId]);
 
   const handleSave = useCallback(async (recipe) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -135,22 +120,22 @@ export default function DiscoverScreen() {
             <RecipeCard key={'ld-' + i} loading />
           ))
         : null}
-      {!loading && recipes.length > 0 ? (
+      {!loading && recipes.length > 0 && session.sessionPoolId ? (
         <Pressable
           onPress={handleLoadMore}
-          className="py-4 rounded-xl border border-border items-center flex-row justify-center gap-2 active:bg-gray-50"
+          className="py-4 rounded-xl border border-border items-center flex-row justify-center gap-2 active:bg-gray-50 mb-2"
         >
           <Ionicons name="chevron-down" size={18} color="#64748B" />
           <Text className="text-sm font-semibold text-text-secondary">More Recipes</Text>
         </Pressable>
       ) : null}
       {poolInfo.poolSize > 0 ? (
-        <Text className="text-xs text-text-muted text-center mt-3 pb-2">
-          {poolInfo.shownCount} of {poolInfo.poolSize} shown · more loading in background
+        <Text className="text-xs text-text-muted text-center mt-1 pb-2">
+          {poolInfo.shownCount} of {poolInfo.poolSize} shown
         </Text>
       ) : null}
     </>
-  ), [loading, recipes.length, handleLoadMore, poolInfo]);
+  ), [loading, recipes.length, handleLoadMore, poolInfo, session.sessionPoolId]);
 
   return (
     <SafeAreaView className="flex-1 bg-background">
@@ -193,9 +178,11 @@ export default function DiscoverScreen() {
           initialNumToRender={RECIPE_BATCH_SIZE}
           maxToRenderPerBatch={RECIPE_BATCH_SIZE}
           windowSize={5}
-          onScrollToIndexFailed={(info) => {
-            // Fallback: scroll to end if target index isn't rendered yet
-            setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+          // Auto-load next batch when user reaches 80% of the list
+          onEndReachedThreshold={0.8}
+          onEndReached={handleLoadMore}
+          onScrollToIndexFailed={() => {
+            flatListRef.current?.scrollToEnd({ animated: true });
           }}
         />
       )}

@@ -189,6 +189,66 @@ def _recipe_id_from_url(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Description sanitizer — remove web-scraping artifacts
+# ---------------------------------------------------------------------------
+_DESC_JUNK_PATTERNS = [
+    # References to page UI elements
+    re.compile(r"\b(recipe\s+)?video\s+(above|below|here)\b", re.IGNORECASE),
+    re.compile(r"\bwatch\s+(the\s+)?(video|clip|tutorial)\b", re.IGNORECASE),
+    re.compile(r"\bscroll\s+(down|up|below)\b", re.IGNORECASE),
+    re.compile(r"\bclick\s+(here|below|above|the\s+link)\b", re.IGNORECASE),
+    re.compile(r"\btap\s+(here|below|above|the)\b", re.IGNORECASE),
+    re.compile(r"\bjump\s+to\s+recipe\b", re.IGNORECASE),
+    re.compile(r"\bprint\s+recipe\b", re.IGNORECASE),
+    re.compile(r"\bsee\s+(the\s+)?recipe\s+card\s+(below|above)\b", re.IGNORECASE),
+    re.compile(r"\brecipe\s+card\s+(below|above)\b", re.IGNORECASE),
+    re.compile(r"\bpin\s+(this|it)\b", re.IGNORECASE),
+    re.compile(r"\bshare\s+(this|it)\s+(on|via)\b", re.IGNORECASE),
+    re.compile(r"\b(leave|post)\s+a\s+comment\b", re.IGNORECASE),
+    re.compile(r"\bsign\s+up\s+(for|to)\b", re.IGNORECASE),
+    re.compile(r"\bsubscribe\b", re.IGNORECASE),
+    re.compile(r"\bnewsletter\b", re.IGNORECASE),
+    re.compile(r"\baffiliate\s+link", re.IGNORECASE),
+    re.compile(r"\bsponsored\s+post\b", re.IGNORECASE),
+    re.compile(r"\bphoto\s+(above|below|credit)\b", re.IGNORECASE),
+    re.compile(r"\bimage\s+(above|below|credit)\b", re.IGNORECASE),
+    re.compile(r"\bas\s+an?\s+amazon\s+associate\b", re.IGNORECASE),
+]
+
+
+def _clean_description(description: str, title: str = "") -> str:
+    """
+    Remove web-scraping artifacts from a recipe description.
+    If the cleaned result is too short, generate a simple description from the title.
+    """
+    if not description:
+        return f"A delicious {title}." if title else ""
+
+    text = description.strip()
+
+    # Remove sentences that contain junk patterns
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    clean_sentences = []
+    for sentence in sentences:
+        if any(pat.search(sentence) for pat in _DESC_JUNK_PATTERNS):
+            continue
+        clean_sentences.append(sentence)
+
+    cleaned = " ".join(clean_sentences).strip()
+
+    # If cleaning removed too much, fall back to title-based description
+    if len(cleaned) < 20:
+        return f"A delicious {title}." if title else ""
+
+    # Truncate overly long descriptions (max ~300 chars)
+    if len(cleaned) > 300:
+        cut = cleaned[:297].rsplit(" ", 1)[0]
+        cleaned = cut.rstrip(".,!?;:") + "..."
+
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
 # Title similarity (Jaccard on cleaned token sets)
 # ---------------------------------------------------------------------------
 _STOPWORDS = {
@@ -279,25 +339,44 @@ def _ddg_text_sync(query: str, max_results: int = 5) -> list[dict]:
 
 
 async def _ddg_search(query: str, require_target_site: bool = True) -> Optional[str]:
-    """DuckDuckGo search, non-blocking (runs sync client in thread pool)."""
+    """DuckDuckGo search with retry + exponential backoff."""
     loop = asyncio.get_event_loop()
-    async with _SEARCH_SEM:
-        try:
-            results = await asyncio.wait_for(
-                loop.run_in_executor(_THREAD_POOL, _ddg_text_sync, query, 5),
-                timeout=20.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("DDG search timed out for query: %s", query[:80])
-            return None
-        except Exception as exc:
-            logger.warning("DDG search error: %s", exc)
-            return None
+    max_retries = 3
+    for attempt in range(max_retries):
+        async with _SEARCH_SEM:
+            try:
+                results = await asyncio.wait_for(
+                    loop.run_in_executor(_THREAD_POOL, _ddg_text_sync, query, 5),
+                    timeout=20.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("DDG search timed out for query: %s (attempt %d)", query[:80], attempt + 1)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
+            except Exception as exc:
+                exc_msg = str(exc)
+                # Rate-limited or empty — retry with backoff
+                if "No results" in exc_msg or "rate" in exc_msg.lower():
+                    if attempt < max_retries - 1:
+                        delay = 2 ** attempt + 1
+                        logger.info("DDG rate-limited for '%s' — retrying in %ds (attempt %d)", query[:60], delay, attempt + 1)
+                        await asyncio.sleep(delay)
+                        continue
+                logger.warning("DDG search error: %s", exc)
+                return None
 
-    for r in results:
-        url = r.get("href") or r.get("url") or ""
-        if not require_target_site or any(site in url for site in _ALL_SITES):
-            return url
+        for r in results:
+            url = r.get("href") or r.get("url") or ""
+            if not require_target_site or any(site in url for site in _ALL_SITES):
+                return url
+        # If site-filtered search got results but none matched, don't retry
+        if results:
+            return None
+        # No results at all — retry
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1)
     return None
 
 
@@ -400,6 +479,7 @@ async def _scrape_recipe(url: str, suggestion: dict) -> Optional[dict]:
             first = re.split(r'\.\s+', str(raw_instructions))[0].strip()
             if len(first) > 20:
                 description = first + "."
+        description = _clean_description(description, title)
 
         def _safe_int(fn, default):
             try:
@@ -512,6 +592,7 @@ async def _resolve_suggestion(
     cache_hits: dict[str, dict],
     seen_ids: set[str],
     seen_lock: asyncio.Lock,
+    stagger_delay: float = 0.0,
 ) -> Optional[tuple[str, dict]]:
     """
     Resolve one LLM suggestion to a recipe dict.
@@ -521,6 +602,10 @@ async def _resolve_suggestion(
     name = suggestion.get("name", "")
     if not name:
         return None
+
+    # Stagger web searches to avoid DDG rate-limiting bursts
+    if stagger_delay > 0:
+        await asyncio.sleep(stagger_delay)
 
     # Step 1: check pre-loaded cache
     cached = cache_hits.get(name)
@@ -589,8 +674,9 @@ async def fetch_recipes_batch(
     logger.info("Stage 3: %d cache hits from %d suggestions", len(cache_hits), len(suggestion_names))
 
     tasks = [
-        _resolve_suggestion(s, ctx, cache_hits, seen_ids, seen_lock)
-        for s in suggestions
+        _resolve_suggestion(s, ctx, cache_hits, seen_ids, seen_lock,
+                            stagger_delay=i * 0.3)  # stagger to avoid DDG bursts
+        for i, s in enumerate(suggestions)
     ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 

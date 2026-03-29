@@ -8,6 +8,17 @@ import { API_BASE_URL, API_TIMEOUT_MS } from '../constants/config';
 let accessToken = null;
 let refreshTokenFn = null;
 
+// Registry of all AbortControllers for in-flight requests.
+// Calling abortAllPendingRequests() cancels every active fetch immediately.
+const _activeControllers = new Set();
+
+export const abortAllPendingRequests = () => {
+  for (const ctrl of _activeControllers) {
+    ctrl.abort();
+  }
+  _activeControllers.clear();
+};
+
 /**
  * Sets the current access token for authenticated requests.
  * @param {string|null} token
@@ -49,6 +60,7 @@ export const apiRequest = async (endpoint, options = {}) => {
   }
 
   const controller = new AbortController();
+  _activeControllers.add(controller);
   const timeout = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
 
   try {
@@ -86,6 +98,7 @@ export const apiRequest = async (endpoint, options = {}) => {
     throw new ApiError(error.message || 'Network error', 'ERR_NETWORK', 0, true);
   } finally {
     clearTimeout(timeout);
+    _activeControllers.delete(controller);
   }
 };
 

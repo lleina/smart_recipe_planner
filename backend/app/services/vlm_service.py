@@ -23,18 +23,32 @@ from app.schemas import IngredientItem
 logger = logging.getLogger("app.vlm")
 
 VLM_PROMPT = (
-    "Identify all visible food ingredients in this image. "
-    "For each ingredient return a JSON object with exactly these fields: "
-    "name (string), confidence (float 0-1), "
+    "Look at this image and identify ONLY the food and drink ingredients that are visible. "
+    "DO NOT include bowls, plates, pots, pans, cups, glasses, mugs, utensils, knives, forks, "
+    "spoons, spatulas, cutting boards, trays, racks, containers, packaging, bags, wrappers, "
+    "labels, paper, cloth, towels, napkins, or any non-food object. "
+    "If you are not certain something is a food or drink ingredient, do NOT include it. "
+    "For each FOOD OR DRINK INGREDIENT ONLY return a JSON object with exactly these fields: "
+    "name (string — ingredient name only, e.g. 'chicken breast', 'onion', 'olive oil'), "
+    "confidence (float 0-1), "
     "category (one of: perishable, semi-perishable, shelf-stable), "
     "urgency (integer days until spoilage based on visual cues and typical shelf life; "
     "null for shelf-stable items), "
     "estimatedQuantity (number, approximate count or amount visible), "
     "unit (one of: pieces, bags, bunches, lbs, cups, boxes, bottles, cans). "
-    "Return ONLY a valid JSON array. No markdown, no explanation."
+    "Return ONLY a valid JSON array of food ingredients. No markdown, no explanation."
 )
 
-_CONFIDENCE_THRESHOLD = 0.5
+_CONFIDENCE_THRESHOLD = 0.55
+
+# Names (or substrings) that are never food — used to post-filter VLM hallucinations.
+_NON_FOOD_KEYWORDS = {
+    'bowl', 'plate', 'pan', 'pot', 'cup', 'glass', 'mug', 'knife', 'fork', 'spoon',
+    'spatula', 'ladle', 'tongs', 'whisk', 'peeler', 'grater', 'cutting board',
+    'container', 'packaging', 'wrapper', 'bag clip', 'label', 'lid', 'cap',
+    'utensil', 'tray', 'rack', 'sheet', 'napkin', 'towel', 'cloth', 'paper',
+    'dish', 'skillet', 'wok', 'colander', 'strainer', 'measuring cup', 'mixing bowl',
+}
 
 
 async def identify_ingredients(image_bytes_list: list[bytes]) -> list[IngredientItem]:
@@ -84,8 +98,16 @@ def _parse_vlm_response(raw: list[dict]) -> list[IngredientItem]:
         confidence = float(item.get("confidence", 0))
         if confidence < _CONFIDENCE_THRESHOLD:
             continue
+
+        item_name = str(item.get("name", "unknown")).lower().strip()
+
+        # Drop anything that looks like cookware, utensils, or containers
+        if any(kw in item_name for kw in _NON_FOOD_KEYWORDS):
+            logger.debug("VLM non-food item filtered out: %s", item_name)
+            continue
+
         parsed.append(IngredientItem(
-            name=str(item.get("name", "unknown")).lower().strip(),
+            name=item_name,
             confidence=confidence,
             category=item.get("category", "shelf-stable"),
             urgency=item.get("urgency"),

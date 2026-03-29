@@ -9,7 +9,7 @@
 
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as SecureStore from 'expo-secure-store';
-import { setAccessToken, setRefreshTokenHandler } from '../services/api';
+import { setAccessToken, setRefreshTokenHandler, abortAllPendingRequests } from '../services/api';
 import { register } from '../services/authService';
 
 const AuthContext = createContext(null);
@@ -109,6 +109,9 @@ export function AuthProvider({ children }) {
   }, [login]);
 
   const logout = useCallback(async () => {
+    // Cancel every in-flight API request immediately so no stale calls
+    // complete after the user's session is cleared.
+    abortAllPendingRequests();
     await Promise.all([
       SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY),
       SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY),

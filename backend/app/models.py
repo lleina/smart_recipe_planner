@@ -79,6 +79,7 @@ class SessionPool(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     session_id = Column(String, nullable=False, index=True)
     recipes = Column(JSON, default=list)
+    session_context = Column(JSON, nullable=True)  # stored for unlimited re-ideation
     total_fetched = Column(Integer, default=0)
     shown_count = Column(Integer, default=0)
     saved_count = Column(Integer, default=0)

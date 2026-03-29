@@ -153,6 +153,7 @@ def _build_user_prompt(
     cuisine_preferences: list[str],
     health_goal: str,
     history_titles: list[str],
+    cooking_equipment: list[str] | None = None,
 ) -> str:
     urgent = [
         f"{_normalize_ingredient_name(i.name)} ({i.estimated_quantity} {i.unit}, use within {i.urgency} days)"
@@ -178,8 +179,20 @@ def _build_user_prompt(
         lines.append(f"Other available ingredients: {', '.join(regular)}")
     if dietary_restrictions:
         lines.append(f"Dietary restrictions (NEVER violate): {', '.join(dietary_restrictions)}")
+    if cooking_equipment:
+        lines.append(
+            f"Available cooking equipment: {', '.join(cooking_equipment)}. "
+            "ONLY suggest recipes that can be made with this equipment. "
+            "Do NOT suggest recipes requiring a grill if the user has no grill, "
+            "or an oven if the user has no oven, etc."
+        )
     if cuisine_preferences:
-        lines.append(f"Preferred cuisines: {', '.join(cuisine_preferences)}")
+        cuisine_str = ', '.join(cuisine_preferences)
+        lines.append(
+            f"Favorite cuisines: {cuisine_str}. "
+            f"At least 60% of your suggestions should be from these cuisines. "
+            f"The remaining suggestions can explore other cuisines for variety."
+        )
     if health_goal and health_goal != "none":
         lines.append(f"Health goal: {health_goal}")
     if history_titles:
@@ -209,8 +222,13 @@ def _build_user_prompt(
         "\"cuisine\" (string), \"estimated_time\" (integer minutes). "
         + urgency_instruction +
         "Focus on well-known, genuinely tasty dishes people would be excited to cook and eat. "
-        "Suggest a variety of cuisines and styles. "
-        "Ensure every suggestion respects the dietary restrictions. "
+        + (
+            "The remaining suggestions can explore other cuisines for additional variety. "
+            if cuisine_preferences else
+            "Suggest a variety of cuisines and styles. "
+        )
+        + "Ensure every suggestion respects the dietary restrictions. "
+        "Ensure every suggestion can be made with the user's available cooking equipment. "
         "Return ONLY a JSON array."
     )
     return "\n".join(lines)
@@ -222,6 +240,7 @@ async def ideate_recipes(
     cuisine_preferences: list[str],
     health_goal: str,
     history_titles: list[str],
+    cooking_equipment: list[str] | None = None,
 ) -> list[dict]:
     """
     Calls the configured LLM to generate recipe suggestions.
@@ -235,7 +254,7 @@ async def ideate_recipes(
     try:
         logger.info("Calling LLM (%s) for %d suggestions (meal=%s, time=%dmin)",
                     LLM_MODEL, _IDEATION_COUNT, context.meal_type, context.available_time_minutes)
-        result = await _call_llm(context, dietary_restrictions, cuisine_preferences, health_goal, history_titles)
+        result = await _call_llm(context, dietary_restrictions, cuisine_preferences, health_goal, history_titles, cooking_equipment or [])
         logger.info("LLM returned %d suggestions", len(result))
         return result
     except Exception as e:
@@ -249,10 +268,14 @@ async def _call_llm(
     cuisine_preferences: list[str],
     health_goal: str,
     history_titles: list[str],
+    cooking_equipment: list[str] | None = None,
 ) -> list[dict]:
     user_prompt = _build_user_prompt(
-        context, dietary_restrictions, cuisine_preferences, health_goal, history_titles
+        context, dietary_restrictions, cuisine_preferences, health_goal, history_titles,
+        cooking_equipment=cooking_equipment or [],
     )
+
+    logger.info("[LLM ideation] FULL PROMPT SENT TO %s:\n%s", LLM_MODEL, user_prompt)
 
     raw_text = await ollama_chat(
         base_url=LLM_BASE_URL,
@@ -338,23 +361,32 @@ def _fallback_suggestions(context: SessionContextRequest) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 _SUBSTITUTION_PROMPT = """\
-You are a helpful cooking assistant. Given a recipe's ingredients and a list of ingredients the user already has, identify which recipe ingredients the user is MISSING, and suggest a practical substitution from the user's available ingredients or common pantry staples.
+You are a helpful cooking assistant. Given a recipe's ingredients and a list of ingredients the user has, identify what the user is MISSING and suggest practical substitutions.
 
 Recipe ingredients:
 {recipe_ingredients}
 
-User has these ingredients available:
+User has these ingredients:
 {user_ingredients}
 
-Return a JSON array of objects. Each object represents ONE recipe ingredient and has these fields:
-- "ingredient": the recipe ingredient name (exactly as listed)
-- "have": true if the user has this ingredient (or a very close match), false otherwise
-- "substitution": if have is false and a good swap exists, a short string like "use <X> instead". If no good substitution exists, null.
+IMPORTANT — the user ALWAYS has these universal pantry staples, even if not listed above:
+salt, sea salt, kosher salt, black pepper, white pepper, ground pepper, white sugar, granulated sugar, brown sugar, powdered sugar, all-purpose flour, cornstarch, baking soda, baking powder, vegetable oil, canola oil, olive oil, extra virgin olive oil, white vinegar, apple cider vinegar, red wine vinegar, water, garlic powder, onion powder, paprika, smoked paprika, cumin, cinnamon, dried oregano, dried basil, dried thyme, chili powder, cayenne pepper, red pepper flakes, turmeric, nutmeg, italian seasoning.
+Mark any of these as "have: true" automatically — these are dry goods every kitchen stocks.
+DO NOT assume the user has: butter, milk, eggs, cream, cheese, honey, soy sauce, vanilla extract, or any fresh produce/perishables unless explicitly listed.
 
-Rules:
-- Match loosely: "chicken breast" matches "chicken", "olive oil" matches "oil", etc.
-- Only suggest substitutions that genuinely work in cooking (e.g. lime for lemon, Greek yogurt for sour cream, any pasta shape for another).
-- If the user doesn't have a substitute, set substitution to null.
+Return a JSON array of objects. Each object represents ONE recipe ingredient:
+- "ingredient": the recipe ingredient name (exactly as listed)
+- "have": true if the user has this ingredient or a close match, false otherwise
+- "substitution": if have is false and a good swap exists, a short string like "use <X> instead" or "any <Y> works". null if no good substitute.
+
+Rules for matching:
+- "have: true" ONLY when the user actually has the ingredient or an equivalent form (e.g., "chicken" matches "chicken breast", "whole milk" matches "milk"). Do NOT assume the user has something they didn't list.
+- Pantry staples listed above are always "have: true".
+- ALL pasta shapes are interchangeable: penne → rigatoni, spaghetti → linguine, fusilli → rotini, fettuccine → tagliatelle, farfalle → rotini, etc. If the user has ANY pasta the recipe's pasta requirement is "have: true" with a note like "use [their pasta] instead".
+- Dairy swaps: milk ↔ plant milk, sour cream ↔ Greek yogurt, heavy cream ↔ coconut cream, etc.
+- Acid swaps: lemon juice ↔ lime juice ↔ white wine vinegar (small amounts).
+- Only suggest substitutions that genuinely work in cooking.
+- Keep substitution strings SHORT (under 12 words).
 - Return ONLY the JSON array, no explanation.
 """
 
@@ -377,6 +409,8 @@ async def suggest_substitutions(
         recipe_ingredients="\n".join(f"- {ing}" for ing in recipe_ingredients),
         user_ingredients="\n".join(f"- {ing}" for ing in user_ingredients) if user_ingredients else "(none listed)",
     )
+
+    logger.info("[LLM substitution] FULL PROMPT SENT TO %s:\n%s", LLM_MODEL, prompt)
 
     try:
         raw = await ollama_chat(

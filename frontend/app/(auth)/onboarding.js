@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../src/context/AuthContext';
+import { updatePreferences } from '../../src/services/userService';
 import StepIndicator from '../../src/components/common/StepIndicator';
 import Button from '../../src/components/common/Button';
 import Tag from '../../src/components/common/Tag';
@@ -43,7 +44,7 @@ export default function OnboardingScreen() {
   const [preferences, setPreferences] = useState(DEFAULT_PREFERENCES);
   const [saving, setSaving] = useState(false);
   const router = useRouter();
-  const { completeOnboarding, user } = useAuth();
+  const { completeOnboarding, user, ensureRegistered } = useAuth();
 
   const toggleArrayItem = useCallback((key, itemId) => {
     setPreferences((prev) => {
@@ -70,12 +71,18 @@ export default function OnboardingScreen() {
   const handleFinish = async () => {
     setSaving(true);
     try {
-      // Save preferences locally — backend sync happens lazily when server is needed
+      // Save preferences locally first (so app works even if server sync fails)
       await AsyncStorage.setItem('@user_preferences', JSON.stringify(preferences));
+
+      // Ensure user is registered with the backend, then sync preferences so
+      // recipe recommendations actually use the cuisines/diet the user chose.
+      await ensureRegistered();
+      await updatePreferences(preferences);
+
       await completeOnboarding();
       router.replace('/(tabs)/discover');
     } catch {
-      // Still complete onboarding so user is not blocked
+      // Sync failed — still complete onboarding so user isn't blocked
       await completeOnboarding();
       router.replace('/(tabs)/discover');
     } finally {
