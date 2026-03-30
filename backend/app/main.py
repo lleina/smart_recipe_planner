@@ -1,25 +1,52 @@
 """
-Smart Recipe Planner - Backend API entry point.
+Smart Recipe Planner — Backend API entry point.
+
+Responsibilities:
+    - FastAPI application factory and lifecycle management (``lifespan``).
+    - Global exception handler with structured JSON error responses.
+    - HTTP request logging middleware (method, path, status, latency).
+    - CORS middleware configuration.
+    - Router registration for all API route modules.
+    - Health check endpoint at GET /api/health.
+
+Startup sequence:
+    1. Initialize the database (create tables + apply migrations).
+    2. Log the active configuration for LLM, VLM, and recipe fetcher.
+    3. Begin serving requests.
 """
 
 import logging
 import time
 import traceback
 from contextlib import asynccontextmanager
+
+import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from app.config import CORS_ORIGINS, LLM_BASE_URL, VLM_BASE_URL, SERPAPI_KEY, WEB_RECIPE_SITES
-from app.database import init_db
+
+from app.config import (
+    CORS_ORIGINS,
+    LLM_BASE_URL,
+    SERPAPI_KEY,
+    VLM_BASE_URL,
+    WEB_RECIPE_SITES,
+)
+from app.database import engine as db_engine, init_db
 from app.routes import (
-    auth_routes, user_routes, vlm_routes,
-    recommend_routes, history_routes, saved_routes, event_routes,
+    auth_routes,
+    event_routes,
+    history_routes,
     recipe_routes,
+    recommend_routes,
+    saved_routes,
+    user_routes,
+    vlm_routes,
 )
 
 # ---------------------------------------------------------------------------
-# Structured logging setup
+# Structured logging — format is consistent across all app.* loggers.
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -30,39 +57,47 @@ logger = logging.getLogger("app")
 
 
 @asynccontextmanager
-async def lifespan(application: FastAPI):
+async def _application_lifespan(application: FastAPI):
+    """Manage startup and shutdown tasks for the FastAPI application.
+
+    On startup: initialize the database and log the active configuration.
+    On shutdown: log the shutdown event (engine cleanup handled by SQLAlchemy).
+
+    Args:
+        application: The FastAPI application instance (unused; required by API).
+    """
     logger.info("Starting up — initializing database")
     await init_db()
     logger.info("Database ready")
 
-    # -----------------------------------------------------------------------
-    # Startup configuration summary — makes it immediately obvious which
-    # external services are live vs. running in mock/fallback mode.
-    # -----------------------------------------------------------------------
-    # Web recipe fetcher — always active; SerpAPI is optional
+    # Log active configuration so engineers can confirm the right services
+    # are live vs. running in mock/fallback mode on startup.
     if SERPAPI_KEY:
-        logger.info("Recipe fetcher: web mode with SerpAPI ✓ (sites: %s)", WEB_RECIPE_SITES)
+        logger.info(
+            "Recipe fetcher: web mode with SerpAPI ✓ (sites: %s)", WEB_RECIPE_SITES
+        )
     else:
         logger.info(
-            "Recipe fetcher: web mode via DuckDuckGo (free, no key) — "
-            "set SERPAPI_KEY in .env for higher-reliability Google-backed search. "
-            "Sites: %s", WEB_RECIPE_SITES
+            "Recipe fetcher: DuckDuckGo (free, no API key) — "
+            "set SERPAPI_KEY for higher-reliability Google-backed search. "
+            "Sites: %s",
+            WEB_RECIPE_SITES,
         )
 
-    if not LLM_BASE_URL:
-        logger.warning(
-            "LLM_BASE_URL is not set — LLM ideation is DISABLED. "
-            "Recipe suggestions will fall back to generic keyword list."
-        )
+    if LLM_BASE_URL:
+        logger.info("LLM configured at %s ✓", LLM_BASE_URL)
     else:
-        logger.info("LLM: %s at %s ✓", "(see LLM_MODEL)", LLM_BASE_URL)
+        logger.warning(
+            "LLM_BASE_URL is not set — LLM ideation disabled; "
+            "recipe suggestions will use a keyword fallback list."
+        )
 
-    if not VLM_BASE_URL:
-        logger.warning(
-            "VLM_BASE_URL is not set — ingredient scanning will use MOCK ingredients."
-        )
+    if VLM_BASE_URL:
+        logger.info("VLM configured at %s ✓", VLM_BASE_URL)
     else:
-        logger.info("VLM: configured at %s ✓", VLM_BASE_URL)
+        logger.warning(
+            "VLM_BASE_URL is not set — ingredient scanning will use mock data."
+        )
 
     yield
     logger.info("Shutting down")
@@ -71,29 +106,65 @@ async def lifespan(application: FastAPI):
 app = FastAPI(
     title="Smart Recipe Planner API",
     version="0.1.0",
-    lifespan=lifespan,
+    lifespan=_application_lifespan,
 )
 
 
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url.path, "".join(tb))
-    return JSONResponse(status_code=500, content={"error": {
-        "code": "ERR_INTERNAL",
-        "message": "An unexpected error occurred. Please try again.",
-        "retryable": True,
-    }})
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch any unhandled exception and return a standardized 500 JSON error.
+
+    Logs the full traceback at ERROR level so issues are visible in server
+    logs without exposing stack traces to the client.
+
+    Args:
+        request: The HTTP request that triggered the exception.
+        exc: The unhandled exception.
+
+    Returns:
+        A JSON response with a standardized error shape and HTTP 500 status.
+    """
+    formatted_traceback = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
+    logger.error(
+        "Unhandled exception on %s %s:\n%s",
+        request.method,
+        request.url.path,
+        formatted_traceback,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "ERR_INTERNAL",
+                "message": "An unexpected error occurred. Please try again.",
+                "retryable": True,
+            }
+        },
+    )
 
 
 @app.middleware("http")
-async def request_logging_middleware(request: Request, call_next):
-    start = time.perf_counter()
+async def log_every_request(request: Request, call_next):
+    """Log the method, path, status code, and latency for every HTTP request.
+
+    Args:
+        request: Incoming HTTP request.
+        call_next: Next middleware or route handler in the chain.
+
+    Returns:
+        The HTTP response from the route handler.
+    """
+    request_start = time.perf_counter()
     response = await call_next(request)
-    elapsed_ms = (time.perf_counter() - start) * 1000
+    elapsed_ms = (time.perf_counter() - request_start) * 1000
     logger.info(
         "%s %s → %d (%.0fms)",
-        request.method, request.url.path, response.status_code, elapsed_ms,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
     )
     return response
 
@@ -116,60 +187,78 @@ app.include_router(event_routes.router)
 app.include_router(recipe_routes.router)
 
 
+def _check_ollama_reachability(base_url: str) -> str:
+    """Return the Ollama API root URL derived from an OpenAI-compatible base URL.
+
+    Strips the trailing ``/v1`` segment (if present) to produce the Ollama
+    root from which ``/api/tags`` can be queried for health checks.
+
+    Args:
+        base_url: The configured endpoint URL (e.g. ``http://localhost:11434/v1``).
+
+    Returns:
+        The Ollama root URL (e.g. ``http://localhost:11434``).
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    return root
+
+
 @app.get("/api/health")
-async def health_check():
-    """NFR-OBS-02: Health check with dependency status."""
-    from app.config import VLM_BASE_URL, LLM_BASE_URL, SERPAPI_KEY
-    from app.database import engine as db_engine
-    import httpx
+async def health_check() -> dict:
+    """Return service health and dependency status.
 
-    deps = {}
+    Probes the database, VLM endpoint, and LLM endpoint with short timeouts
+    and aggregates the results into a single health status. Useful for
+    monitoring and for the startup log to confirm all services are live.
 
-    # DB check
+    Returns:
+        Dict with ``status`` (``"ok"`` or ``"degraded"``) and a
+        ``dependencies`` dict mapping each service name to its status string
+        (``"ok"``, ``"degraded"``, ``"down"``, or ``"mock"``).
+    """
+    dependency_status: dict[str, str] = {}
+
+    # Database health — a simple SELECT 1 confirms the connection is alive.
     try:
-        async with db_engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        deps["db"] = "ok"
-    except Exception:
-        deps["db"] = "down"
+        async with db_engine.connect() as db_connection:
+            await db_connection.execute(text("SELECT 1"))
+        dependency_status["db"] = "ok"
+    except Exception:  # pylint: disable=broad-except
+        dependency_status["db"] = "down"
 
-    # VLM check
+    # VLM health — query Ollama's /api/tags endpoint with a 3-second timeout.
     if VLM_BASE_URL:
         try:
-            ollama_root = VLM_BASE_URL.rstrip("/")
-            if ollama_root.endswith("/v1"):
-                ollama_root = ollama_root[:-3]
-            async with httpx.AsyncClient(timeout=3) as client:
-                r = await client.get(f"{ollama_root}/api/tags")
-                deps["vlm"] = "ok" if r.status_code == 200 else "degraded"
-        except Exception:
-            deps["vlm"] = "down"
+            ollama_root = _check_ollama_reachability(VLM_BASE_URL)
+            async with httpx.AsyncClient(timeout=3) as http_client:
+                response = await http_client.get(f"{ollama_root}/api/tags")
+            dependency_status["vlm"] = "ok" if response.status_code == 200 else "degraded"
+        except Exception:  # pylint: disable=broad-except
+            dependency_status["vlm"] = "down"
     else:
-        deps["vlm"] = "mock"
+        dependency_status["vlm"] = "mock"
 
-    # LLM check
+    # LLM health — same approach as VLM.
     if LLM_BASE_URL:
         try:
-            ollama_root = LLM_BASE_URL.rstrip("/")
-            if ollama_root.endswith("/v1"):
-                ollama_root = ollama_root[:-3]
-            async with httpx.AsyncClient(timeout=3) as client:
-                r = await client.get(f"{ollama_root}/api/tags")
-                deps["llm"] = "ok" if r.status_code == 200 else "degraded"
-        except Exception:
-            deps["llm"] = "down"
+            ollama_root = _check_ollama_reachability(LLM_BASE_URL)
+            async with httpx.AsyncClient(timeout=3) as http_client:
+                response = await http_client.get(f"{ollama_root}/api/tags")
+            dependency_status["llm"] = "ok" if response.status_code == 200 else "degraded"
+        except Exception:  # pylint: disable=broad-except
+            dependency_status["llm"] = "down"
     else:
-        deps["llm"] = "mock"
+        dependency_status["llm"] = "mock"
 
-    # Web recipe fetcher — always active; SerpAPI enhances reliability
-    deps["recipe_fetcher"] = "serpapi" if SERPAPI_KEY else "duckduckgo"
+    # Recipe fetcher is always active; SerpAPI availability is informational.
+    dependency_status["recipe_fetcher"] = "serpapi" if SERPAPI_KEY else "duckduckgo"
 
-    all_vals = list(deps.values())
-    if all(v in ("ok", "mock") for v in all_vals):
-        overall = "ok"
-    elif "down" in all_vals:
-        overall = "degraded"
+    all_status_values = list(dependency_status.values())
+    if all(status in ("ok", "mock", "duckduckgo", "serpapi") for status in all_status_values):
+        overall_status = "ok"
     else:
-        overall = "degraded"
+        overall_status = "degraded"
 
-    return {"status": overall, "dependencies": deps}
+    return {"status": overall_status, "dependencies": dependency_status}
