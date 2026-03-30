@@ -96,12 +96,12 @@ Scan the QR code with Expo Go (Android) or Camera app (iOS).
 
 **Frontend** (no backend needed):
 ```bash
-cd ~/recipe_generator/frontend && npm test
+cd frontend && npm test
 ```
 
 **Backend** (requires backend + Ollama running via `./start_all.sh`):
 ```bash
-cd ~/recipe_generator/backend
+cd backend
 source venv/bin/activate
 pytest tests/ -v                        # all tests (~10 min)
 pytest tests/ -v -m "not slow"          # skip LLM pipeline tests
@@ -111,21 +111,33 @@ pytest tests/test_infinite_scroll.py    # infinite scroll only
 ## Project Structure
 
 ```
-recipe_generator/
-├── frontend/              # Expo mobile app
-│   ├── app/               # Expo Router screens (file-based routing)
+├── frontend/                   # Expo mobile app
+│   ├── app/                    # Expo Router screens (file-based routing)
+│   │   ├── (auth)/             # Welcome + onboarding screens
+│   │   ├── (tabs)/             # Main tab screens (discover, saved, history, profile)
+│   │   ├── session/            # Session flow (setup, generating)
+│   │   └── recipe/[id].js      # Recipe detail screen
 │   ├── src/
-│   │   ├── components/    # Reusable UI components by feature domain
-│   │   ├── hooks/         # Custom React hooks (primary state management)
-│   │   ├── services/      # API client layer (sole HTTP communication)
-│   │   ├── utils/         # Pure utility functions
-│   │   ├── constants/     # Static data and configuration
-│   │   └── context/       # React context providers (auth, session)
-│   ├── assets/            # Static images, fonts
-│   └── __tests__/         # Tests mirroring src/ structure
-├── backend/               # Python API server
-│   ├── app/               # FastAPI routes, models, services
-│   └── scripts/           # Model setup and startup scripts
+│   │   ├── components/common/  # Reusable UI components (Button, RecipeCard, etc.)
+│   │   ├── context/            # React context providers (Auth, Recipe, Session, SavedRecipes)
+│   │   ├── hooks/              # Custom hooks (useRecipes, useVlm, useSavedRecipes, etc.)
+│   │   ├── services/           # API client layer (sole HTTP communication)
+│   │   ├── utils/              # Pure utility functions (ingredients, time, validation)
+│   │   └── constants/          # Static config, meal types, dietary options
+│   ├── assets/                 # Images, fonts
+│   └── __tests__/              # Tests mirroring src/ structure
+│       ├── context/            # Context tests (RecipeContext pagination)
+│       ├── hooks/              # Hook tests
+│       ├── services/           # Service tests
+│       └── utils/              # Utility tests
+├── backend/                    # Python FastAPI server
+│   ├── app/
+│   │   ├── routes/             # API route handlers
+│   │   └── services/           # LLM, VLM, pipeline, ranking services
+│   ├── tests/                  # pytest integration tests
+│   └── scripts/                # Model setup and startup scripts
+├── start_all.sh                # Start backend + models in one command
+└── stop_all.sh                 # Stop all servers
 ```
 
 ## Environment Variables
