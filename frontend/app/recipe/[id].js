@@ -16,7 +16,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useAuth } from '../../src/context/AuthContext';
 import { useSession } from '../../src/context/SessionContext';
-import useSavedRecipes from '../../src/hooks/useSavedRecipes';
+import { useSavedRecipesContext } from '../../src/context/SavedRecipesContext';
+import { useRecipeContext } from '../../src/context/RecipeContext';
 import useHistory from '../../src/hooks/useHistory';
 import { getRecipeById, getSubstitutions } from '../../src/services/recipeService';
 import { trackEvent } from '../../src/services/eventService';
@@ -29,37 +30,32 @@ const DIFFICULTY_LABEL = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
 // ---------------------------------------------------------------------------
 // Common pantry staples — assumed to be available in any home kitchen.
 // These are highlighted green even when not in the user's scanned ingredients.
+// ONLY: salt, black pepper, oil, vinegar, water.
 // ---------------------------------------------------------------------------
+// Do NOT assume the user has: flour, sugar, baking soda, baking powder,
+// cornstarch, butter, milk, eggs, cream, cheese, honey, soy sauce,
+// vanilla extract, spices, seasonings, or any fresh produce/perishables.
 const PANTRY_STAPLES = new Set([
   // salt
-  'salt', 'sea salt', 'kosher salt', 'table salt', 'coarse salt', 'fine salt',
+  'salt', 'sea salt', 'kosher salt',
   // pepper
-  'black pepper',
-  // sugar
-  'sugar', 
+  'black pepper', 'white pepper', 'ground pepper', 'pepper',
   // oils
-  'oil',
-  'garlic powder',
-  'onion powder',
-  'cinnamon',
+  'vegetable oil', 'canola oil', 'olive oil', 'extra virgin olive oil',
+  'oil', 'cooking oil',
   // vinegar
-  'vinegar', 
-  'ketchup',
-  // 'white vinegar', 'apple cider vinegar', 'distilled white vinegar',
-  // 'red wine vinegar',
+  'white vinegar', 'apple cider vinegar', 'red wine vinegar', 'vinegar',
   // water
-  'water'
-  // other near-universals most kitchens have
-  // 'salt and pepper', 'salt & pepper',
+  'water',
 ]);
 
 // Ingredients that are genuinely in every kitchen
 // (NOT butter, milk, eggs, honey — not everyone has these)
 
 // Keyword-based fallback: ingredient names ending in a staple word
-// Deliberately conservative — only the most truly universal items
+// Deliberately conservative — ONLY salt, pepper, oil, vinegar, water
 const _STAPLE_ENDING = new Set([
-  'salt', 'pepper', 'sugar', 'oil', 'vinegar', 'flour', 'starch', 'water',
+  'salt', 'pepper', 'oil', 'vinegar', 'water',
 ]);
 
 function isPantryStaple(name) {
@@ -77,20 +73,112 @@ function isPantryStaple(name) {
 
 // ---------------------------------------------------------------------------
 // Quick local fallback while LLM substitutions are loading
+// Uses token-based fuzzy matching to align with backend ranking_service.py
 // ---------------------------------------------------------------------------
-function quickIngredientMatch(recipeName, availableNames) {
+const _MODIFIERS = new Set([
+  'fresh', 'dried', 'ground', 'chopped', 'minced', 'sliced', 'diced',
+  'crushed', 'large', 'small', 'medium', 'whole', 'boneless', 'skinless',
+  'organic', 'frozen', 'canned', 'raw', 'cooked', 'shredded', 'grated',
+  'melted', 'softened', 'packed', 'finely', 'roughly', 'thinly', 'thick',
+  'thin', 'ripe', 'firm', 'extra', 'plain', 'unsalted', 'salted',
+  'unsweetened', 'sweetened', 'light', 'dark', 'lean', 'trimmed',
+  'peeled', 'deveined', 'pitted', 'toasted', 'roasted', 'smoked',
+  'pickled', 'marinated', 'halved', 'quartered',
+]);
+
+function _normalizeToken(t) {
+  if (t.length <= 2) return t;
+  if (t.endsWith('ies') && t.length > 4) return t.slice(0, -3) + 'y';
+  if (t.endsWith('oes') && t.length > 4) return t.slice(0, -2);
+  if (t.endsWith('es') && t.length > 4) {
+    const base = t.slice(0, -2);
+    if (/(?:s|x|z|ch|sh)$/.test(base)) return base;
+    return t.slice(0, -1);
+  }
+  if (t.endsWith('s') && !t.endsWith('ss') && t.length > 3) return t.slice(0, -1);
+  return t;
+}
+
+function _tokenize(name) {
+  const raw = new Set(name.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(Boolean));
+  const meaningful = new Set([...raw].filter(w => !_MODIFIERS.has(w)));
+  const tokens = meaningful.size > 0 ? meaningful : raw;
+  return new Set([...tokens].map(_normalizeToken));
+}
+
+function _buildAvailableTokens(availableNames) {
+  const tokens = new Set();
+  for (const name of availableNames) {
+    for (const t of _tokenize(name)) tokens.add(t);
+  }
+  return tokens;
+}
+
+// ── Equivalence families (mirrors backend ranking_service.py) ────────────
+// Items in the same family are interchangeable for "have it" matching.
+const _EQUIVALENCE_FAMILIES = [
+  new Set(['pasta','spaghetti','linguine','fettuccine','penne','rigatoni','rotini','fusilli','farfalle','macaroni','ziti','orzo','tagliatelle','pappardelle','bucatini','angel hair','elbow macaroni','cavatappi','orecchiette','shells','egg noodles','noodles','ramen noodles','udon noodles','rice noodles','lo mein noodles','soba noodles']),
+  new Set(['milk','whole milk','2% milk','skim milk','low-fat milk','cream','heavy cream','heavy whipping cream','whipping cream','half and half','half-and-half','light cream','evaporated milk','coconut milk','oat milk','almond milk','soy milk','plant milk']),
+  new Set(['rice','white rice','brown rice','jasmine rice','basmati rice','long grain rice','short grain rice','sushi rice','arborio rice','wild rice','instant rice']),
+  new Set(['chicken','chicken breast','chicken thigh','chicken thighs','chicken leg','chicken legs','chicken drumstick','chicken drumsticks','chicken wing','chicken wings','chicken tender','chicken tenders','rotisserie chicken','boneless chicken']),
+  new Set(['beef','ground beef','steak','beef stew meat','chuck roast','sirloin','flank steak','skirt steak','ribeye','beef chuck','stewing beef']),
+  new Set(['pork','pork chops','pork loin','pork tenderloin','pork shoulder','ground pork','pork belly']),
+  new Set(['cheese','cheddar cheese','cheddar','mozzarella','mozzarella cheese','parmesan','parmesan cheese','swiss cheese','provolone','monterey jack','colby jack','pepper jack','american cheese','cream cheese','gouda','gruyere','feta','feta cheese','ricotta','ricotta cheese','cottage cheese']),
+  new Set(['onion','onions','yellow onion','white onion','red onion','sweet onion','shallot','shallots','green onion','green onions','scallion','scallions','spring onion','spring onions']),
+  new Set(['potato','potatoes','russet potato','russet potatoes','yukon gold potato','yukon gold potatoes','red potato','red potatoes','sweet potato','sweet potatoes','baby potatoes','fingerling potatoes','new potatoes']),
+  new Set(['tomato','tomatoes','cherry tomatoes','grape tomatoes','roma tomatoes','plum tomatoes','canned tomatoes','diced tomatoes','crushed tomatoes','tomato sauce','tomato paste','tomato puree','stewed tomatoes']),
+  new Set(['bread','white bread','wheat bread','whole wheat bread','sourdough bread','sandwich bread','french bread','italian bread','ciabatta','baguette','rolls','dinner rolls','hamburger buns','hot dog buns','buns','pita','pita bread','naan','flatbread','tortilla','tortillas','flour tortilla','flour tortillas','corn tortilla','corn tortillas','taco shell','taco shells']),
+  new Set(['bell pepper','bell peppers','green bell pepper','red bell pepper','yellow bell pepper','orange bell pepper','green pepper','red pepper','sweet pepper']),
+  new Set(['yogurt','greek yogurt','plain yogurt','vanilla yogurt','sour cream']),
+  new Set(['lemon','lemons','lemon juice','lime','limes','lime juice']),
+  new Set(['garlic','garlic clove','garlic cloves','minced garlic','fresh garlic','crushed garlic']),
+  new Set(['butter','unsalted butter','salted butter']),
+  new Set(['egg','eggs','large egg','large eggs']),
+  new Set(['sugar','white sugar','granulated sugar','cane sugar']),
+  new Set(['flour','all-purpose flour','all purpose flour','ap flour','plain flour','whole wheat flour','wheat flour']),
+  new Set(['soy sauce','low sodium soy sauce','light soy sauce','dark soy sauce','tamari','coconut aminos']),
+];
+
+// Build lookup: ingredient → family index
+const _INGREDIENT_TO_FAMILY = {};
+_EQUIVALENCE_FAMILIES.forEach((family, idx) => {
+  for (const member of family) {
+    _INGREDIENT_TO_FAMILY[member] = idx;
+  }
+});
+
+function _buildUserFamilies(availableNames) {
+  const families = new Set();
+  for (const name of availableNames) {
+    const lower = name.toLowerCase().trim();
+    if (_INGREDIENT_TO_FAMILY[lower] !== undefined) families.add(_INGREDIENT_TO_FAMILY[lower]);
+    // Also check with modifiers stripped
+    const stripped = lower.split(/\s+/).filter(w => !_MODIFIERS.has(w)).join(' ');
+    if (_INGREDIENT_TO_FAMILY[stripped] !== undefined) families.add(_INGREDIENT_TO_FAMILY[stripped]);
+  }
+  return families;
+}
+
+function _userHasEquivalent(recipeName, userFamilies) {
+  const lower = recipeName.toLowerCase().trim();
+  const fam = _INGREDIENT_TO_FAMILY[lower];
+  if (fam !== undefined && userFamilies.has(fam)) return true;
+  const stripped = lower.split(/\s+/).filter(w => !_MODIFIERS.has(w)).join(' ');
+  const fam2 = _INGREDIENT_TO_FAMILY[stripped];
+  if (fam2 !== undefined && userFamilies.has(fam2)) return true;
+  return false;
+}
+
+function quickIngredientMatch(recipeName, availableNames, availableTokens, userFamilies) {
   const rn = recipeName.toLowerCase().trim();
   if (availableNames.has(rn)) return true;
-  const stripped = rn.replace(
-    /^(fresh|frozen|dried|canned|cooked|raw|boneless|skinless|chopped|minced|diced|sliced|grated|shredded|large|small|medium|ripe|peeled|trimmed|halved|quartered)\s+/gi,
-    ''
-  );
-  if (availableNames.has(stripped)) return true;
-  // Conservative: only match when one name STARTS WITH the other
-  // (catches "chicken" → "chicken breast", but NOT "butter" → "peanut butter")
-  for (const avail of availableNames) {
-    if (stripped.startsWith(avail + ' ') || avail.startsWith(stripped + ' ')) return true;
+  // Token-based fuzzy match (same as backend)
+  const nameTokens = _tokenize(rn);
+  for (const t of nameTokens) {
+    if (availableTokens.has(t)) return true;
   }
+  // Equivalence family match (pasta ↔ fettuccine, milk ↔ cream, etc.)
+  if (userFamilies && _userHasEquivalent(rn, userFamilies)) return true;
   return false;
 }
 
@@ -141,7 +229,8 @@ export default function RecipeDetailScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const { session } = useSession();
-  const { save, remove, isSaved, savedRecipes } = useSavedRecipes();
+  const { save, remove, isSaved, savedRecipes } = useSavedRecipesContext();
+  const { recipes: allRecipes, substitutionsCache, prefetchSubstitutions } = useRecipeContext();
   const { addEntry } = useHistory();
 
   const [recipe, setRecipe] = useState(null);
@@ -160,48 +249,85 @@ export default function RecipeDetailScreen() {
 
   useEffect(() => {
     if (!id) return;
-    loadRecipe();
+    // Try to find the recipe in the already-loaded context cache first.
+    // This makes navigation instant — no round-trip needed.
+    const cached = allRecipes.find((r) => r.id === id);
+    if (cached) {
+      setRecipe(cached);
+      setServings(session.servingCount || cached.servings || 2);
+      setLoading(false);
+    } else {
+      // Fallback for deep links or bookmarks — fetch from API
+      loadRecipe();
+    }
     if (user?.id && session.sessionPoolId) {
       trackEvent({ userId: user.id, sessionId: session.sessionPoolId, recipeId: id, eventType: 'recipe_viewed' }).catch(() => {});
     }
   }, [id]);
 
-  // Fire LLM substitution request once recipe is loaded
+  // Read substitutions from context cache (pre-fetched by discover.js).
+  // If the cache entry is already done, apply it immediately with no wait.
+  // If it's still loading in the background, show the spinner and apply when done.
+  // If not in cache at all (e.g. user opened via deep link), fetch now.
   useEffect(() => {
     if (!recipe || subsRequested.current) return;
+
+    const cached = substitutionsCache[id];
+
+    if (cached?.done && cached.substitutions) {
+      // ✅ Already in cache — instant, no spinner
+      subsRequested.current = true;
+      const map = {};
+      for (const s of cached.substitutions) {
+        if (s.ingredient) {
+          map[s.ingredient.toLowerCase().trim()] = {
+            have: !!s.have,
+            substitution: s.substitution || null,
+          };
+        }
+      }
+      setLlmSubs(map);
+      return;
+    }
+
+    if (cached?.loading) {
+      // In flight from discover pre-fetch — show spinner, wait for it to finish
+      setSubsLoading(true);
+      return;
+    }
+
+    // Not in cache (deep link, direct navigation) — fetch now
     const ingredients = (recipe.ingredients || []).map((ing) => ing.name || '').filter(Boolean);
     const userIngs = (session.availableIngredients || []).map((i) => i.name).filter(Boolean);
     if (ingredients.length === 0) return;
     subsRequested.current = true;
     setSubsLoading(true);
-    getSubstitutions(id, ingredients, userIngs)
-      .then((res) => {
-        if (res?.substitutions && Array.isArray(res.substitutions)) {
-          // Build a lookup map by ingredient name (lowercased)
-          const map = {};
-          for (const s of res.substitutions) {
-            if (s.ingredient) {
-              map[s.ingredient.toLowerCase().trim()] = {
-                have: !!s.have,
-                substitution: s.substitution || null,
-              };
-            }
-          }
-          setLlmSubs(map);
-        }
-      })
-      .catch(() => {
-        // LLM unavailable — local fallback stays active
-      })
-      .finally(() => setSubsLoading(false));
-  }, [recipe]);
+    prefetchSubstitutions(id, ingredients, userIngs);
+  }, [recipe, substitutionsCache, id]);
+
+  // Watch for cache to finish loading (covers the "loading" branch above)
+  useEffect(() => {
+    const cached = substitutionsCache[id];
+    if (!cached?.done || !cached.substitutions) return;
+    const map = {};
+    for (const s of cached.substitutions) {
+      if (s.ingredient) {
+        map[s.ingredient.toLowerCase().trim()] = {
+          have: !!s.have,
+          substitution: s.substitution || null,
+        };
+      }
+    }
+    setLlmSubs(map);
+    setSubsLoading(false);
+  }, [substitutionsCache, id]);
 
   const loadRecipe = async () => {
     setLoading(true);
     try {
       const data = await getRecipeById(id);
       setRecipe(data);
-      setServings(data.servings || session.servingCount || 2);
+      setServings(session.servingCount || data.servings || 2);
     } catch {
       // recipe stays null → shows error state
     } finally {
@@ -247,6 +373,8 @@ export default function RecipeDetailScreen() {
   const availableNames = new Set(
     (session.availableIngredients || []).map((i) => i.name.toLowerCase().trim())
   );
+  const availableTokens = _buildAvailableTokens(availableNames);
+  const userFamilies = _buildUserFamilies(availableNames);
 
   // Pre-compute ingredient status for each recipe ingredient.
   // Uses LLM results when available; falls back to quick local matching.
@@ -255,7 +383,7 @@ export default function RecipeDetailScreen() {
     const name = (ing.name || '').trim();
     const nameKey = name.toLowerCase().trim();
 
-    // Pantry staples (salt, pepper, oil, sugar…) — assumed always on hand
+    // Pantry staples (salt, pepper, oil, vinegar) — assumed always on hand
     if (isPantryStaple(name)) {
       return { haveIt: true, substitution: null, isPantry: true };
     }
@@ -267,8 +395,8 @@ export default function RecipeDetailScreen() {
         isPantry: false,
       };
     }
-    // Fallback: simple local match (no substitution suggestions)
-    const haveIt = quickIngredientMatch(name, availableNames);
+    // Fallback: token-based fuzzy match + equivalence families
+    const haveIt = quickIngredientMatch(name, availableNames, availableTokens, userFamilies);
     return { haveIt, substitution: null, isPantry: false };
   });
 

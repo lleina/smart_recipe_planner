@@ -9,6 +9,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { AuthProvider } from '../src/context/AuthContext';
 import { SessionProvider } from '../src/context/SessionContext';
 import { RecipeProvider } from '../src/context/RecipeContext';
+import { SavedRecipesProvider } from '../src/context/SavedRecipesContext';
 import '../global.css';
 
 SplashScreen.preventAutoHideAsync();
@@ -21,20 +22,22 @@ export default function RootLayout() {
   return (
     <AuthProvider>
       <SessionProvider>
-        <RecipeProvider>
-          <StatusBar style="dark" />
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="index" />
-            <Stack.Screen name="(auth)" />
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="session/setup" />
-            <Stack.Screen name="session/generating" />
-            <Stack.Screen
-              name="recipe/[id]"
-              options={{ headerShown: true, headerTitle: '', headerBackTitle: 'Back' }}
-            />
-          </Stack>
-        </RecipeProvider>
+        <SavedRecipesProvider>
+          <RecipeProvider>
+            <StatusBar style="dark" />
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="index" />
+              <Stack.Screen name="(auth)" />
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="session/setup" />
+              <Stack.Screen name="session/generating" />
+              <Stack.Screen
+                name="recipe/[id]"
+                options={{ headerShown: true, headerTitle: '', headerBackTitle: 'Back' }}
+              />
+            </Stack>
+          </RecipeProvider>
+        </SavedRecipesProvider>
       </SessionProvider>
     </AuthProvider>
   );

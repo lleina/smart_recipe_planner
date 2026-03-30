@@ -23,6 +23,67 @@ const DIFFICULTY_LABELS = {
 };
 
 /**
+ * Compact ingredient-match indicator shown on each recipe card.
+ * Green (≥80%), amber (≥60%), red (<60%).  Shows swap hint for the
+ * first missing key ingredient when available.
+ */
+function IngredientMatchBadge({ recipe }) {
+  const pct = recipe.ingredientMatchPct ?? 0;
+  const matched = recipe.matchedIngredientCount ?? 0;
+  const total = recipe.totalIngredientCount ?? 0;
+  const swaps = recipe.swapSuggestions ?? [];
+  const missingKeys = recipe.missingKeyIngredients ?? [];
+
+  const isHigh = pct >= 80;
+  const isMid = pct >= 60 && pct < 80;
+
+  const iconName = isHigh
+    ? 'checkmark-circle'
+    : isMid
+      ? 'alert-circle-outline'
+      : 'close-circle-outline';
+  const iconColor = isHigh ? '#10B981' : isMid ? '#F59E0B' : '#EF4444';
+  const labelColor = isHigh
+    ? 'text-emerald-600'
+    : isMid
+      ? 'text-amber-600'
+      : 'text-red-500';
+
+  // Build swap hint text
+  let hint = null;
+  if (swaps.length > 0 && swaps[0].swap) {
+    hint = `${capitalize(swaps[0].ingredient)} → try ${swaps[0].swap}`;
+  } else if (missingKeys.length > 0) {
+    const names = missingKeys.slice(0, 2).map(capitalize).join(', ');
+    hint = `Need: ${names}`;
+  }
+
+  return (
+    <View className="mb-1">
+      <View className="flex-row items-center gap-1.5">
+        <Ionicons name={iconName} size={14} color={iconColor} />
+        <Text className={`text-xs font-semibold ${labelColor}`}>
+          {matched}/{total} ingredients
+        </Text>
+      </View>
+      {hint && (
+        <Text
+          className="text-xs text-text-secondary mt-0.5 ml-5"
+          numberOfLines={1}
+        >
+          {hint}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+function capitalize(s) {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
  * @param {object} props
  * @param {object} props.recipe - Recipe data from pipeline.
  * @param {boolean} props.isSaved - Whether the user has saved this recipe.
@@ -112,8 +173,13 @@ function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }
           </Text>
         ) : null}
 
+        {/* Ingredient match indicator */}
+        {recipe.totalIngredientCount > 0 && (
+          <IngredientMatchBadge recipe={recipe} />
+        )}
+
         {/* Meta row */}
-        <View className="flex-row items-center gap-3 flex-wrap">
+        <View className="flex-row items-center gap-3 flex-wrap mt-2">
           <View className="flex-row items-center gap-1">
             <Ionicons name="time-outline" size={14} color="#64748B" />
             <Text className="text-xs text-text-secondary font-medium">
@@ -172,6 +238,8 @@ export default memo(RecipeCard, (prev, next) => {
     prev.recipe?.title === next.recipe?.title &&
     prev.recipe?.image === next.recipe?.image &&
     prev.recipe?.totalTime === next.recipe?.totalTime &&
-    prev.recipe?.rating === next.recipe?.rating
+    prev.recipe?.rating === next.recipe?.rating &&
+    prev.recipe?.ingredientMatchPct === next.recipe?.ingredientMatchPct &&
+    prev.recipe?.matchedIngredientCount === next.recipe?.matchedIngredientCount
   );
 });

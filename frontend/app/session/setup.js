@@ -34,6 +34,7 @@ export default function SessionSetupScreen() {
   const vlm = useVlm({ ensureRegistered });
   const [showAdvancedTime, setShowAdvancedTime] = useState(false);
   const [manualIngredient, setManualIngredient] = useState('');
+  const [noIngredients, setNoIngredients] = useState(false);
   const scrollRef = useRef(null);
   const manualInputRef = useRef(null);
 
@@ -74,6 +75,12 @@ export default function SessionSetupScreen() {
 
   const handleStartDiscovery = () => {
     const confirmedIngredients = vlm.getConfirmedIngredients();
+    if (confirmedIngredients.length === 0) {
+      setNoIngredients(true);
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      return;
+    }
+    setNoIngredients(false);
     updateSession({
       availableIngredients: confirmedIngredients,
       sessionReady: true,
@@ -92,7 +99,7 @@ export default function SessionSetupScreen() {
         <Pressable onPress={() => router.back()} className="mr-4" accessibilityLabel="Go back">
           <Ionicons name="arrow-back" size={24} color="#1E293B" />
         </Pressable>
-        <Text className="text-2xl font-bold text-text-primary">New Session</Text>
+        <Text className="text-2xl font-bold text-text-primary">Find my meal</Text>
       </View>
 
       <ScrollView
@@ -102,8 +109,146 @@ export default function SessionSetupScreen() {
         keyboardShouldPersistTaps="handled"
       >
 
-        {/* Meal Type */}
+        {/* Ingredients — required, moved to top */}
         <View className="py-4">
+          <Text className="text-base font-semibold text-text-primary mb-1">Ingredients</Text>
+          <Text className="text-sm text-text-secondary mb-3">
+            Photo your ingredients and we'll identify them, or add them manually.
+          </Text>
+
+          {noIngredients ? (
+            <Text className="text-sm text-red-500 mb-3">
+              Add at least one ingredient to continue.
+            </Text>
+          ) : null}
+
+          {/* Camera / Upload buttons */}
+          <View className="flex-row gap-3 mb-3">
+            <Pressable
+              onPress={handleCameraPress}
+              className="flex-1 border border-dashed border-border rounded-xl py-5 items-center active:bg-gray-50"
+              accessibilityLabel="Take photo of ingredients"
+            >
+              <Ionicons name="camera-outline" size={28} color="#64748B" />
+              <Text className="text-sm text-text-secondary mt-1">Camera</Text>
+            </Pressable>
+            <Pressable
+              onPress={handleUploadPress}
+              className="flex-1 border border-dashed border-border rounded-xl py-5 items-center active:bg-gray-50"
+              accessibilityLabel="Upload photo of ingredients"
+            >
+              <Ionicons name="image-outline" size={28} color="#64748B" />
+              <Text className="text-sm text-text-secondary mt-1">Upload</Text>
+            </Pressable>
+          </View>
+
+          {/* Identify button shown when images are loaded but not yet identified */}
+          {vlm.images.length > 0 && vlm.ingredients.length === 0 && !vlm.loading ? (
+            <Pressable
+              onPress={handleIdentify}
+              className="bg-primary py-3 rounded-xl items-center mb-3"
+            >
+              <Text className="text-white text-sm font-semibold">
+                Identify {vlm.images.length} Photo{vlm.images.length !== 1 ? 's' : ''}
+              </Text>
+            </Pressable>
+          ) : null}
+
+          {/* VLM loading state */}
+          {vlm.loading ? (
+            <View className="flex-row items-center gap-2 py-3">
+              <ActivityIndicator size="small" color="#2563EB" />
+              <Text className="text-sm text-text-secondary">Identifying ingredients…</Text>
+            </View>
+          ) : null}
+
+          {/* VLM error */}
+          {vlm.error ? (
+            <Text className="text-sm text-red-500 mb-2">{vlm.error}</Text>
+          ) : null}
+
+          {/* Ingredient tags — split into Perishable / Non-perishable */}
+          {vlm.ingredients.length > 0 ? (() => {
+            const perishable = vlm.ingredients.filter(
+              (i) => i.urgency != null && i.urgency <= PERISHABLE_URGENCY_DAYS
+            );
+            const stable = vlm.ingredients.filter(
+              (i) => !(i.urgency != null && i.urgency <= PERISHABLE_URGENCY_DAYS)
+            );
+            return (
+              <View className="mb-3">
+                {perishable.length > 0 ? (
+                  <View className="mb-3">
+                    <Text className="text-xs font-semibold text-red-500 uppercase tracking-wide mb-2">
+                      Perishable — use soon
+                    </Text>
+                    <View className="flex-row flex-wrap">
+                      {perishable.map((ing) => (
+                        <IngredientTag
+                          key={ing.name}
+                          ingredient={ing}
+                          onConfirm={() => { vlm.confirmIngredient(ing.name); setNoIngredients(false); }}
+                          onRemove={() => vlm.removeIngredient(ing.name)}
+                        />
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+                {stable.length > 0 ? (
+                  <View>
+                    {perishable.length > 0 ? (
+                      <Text className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">
+                        Non-perishable
+                      </Text>
+                    ) : (
+                      <Text className="text-sm font-medium text-text-secondary mb-2">
+                        Tap to confirm or remove:
+                      </Text>
+                    )}
+                    <View className="flex-row flex-wrap">
+                      {stable.map((ing) => (
+                        <IngredientTag
+                          key={ing.name}
+                          ingredient={ing}
+                          onConfirm={() => { vlm.confirmIngredient(ing.name); setNoIngredients(false); }}
+                          onRemove={() => vlm.removeIngredient(ing.name)}
+                        />
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+              </View>
+            );
+          })() : null}
+
+          {/* Manual add */}
+          <View className="flex-row gap-2">
+            <TextInput
+              ref={manualInputRef}
+              value={manualIngredient}
+              onChangeText={(t) => { setManualIngredient(t); if (t) setNoIngredients(false); }}
+              onSubmitEditing={handleAddManual}
+              onFocus={() => {
+                setTimeout(() => scrollRef.current?.scrollTo({ y: 0, animated: true }), 200);
+              }}
+              placeholder="Add ingredient manually…"
+              placeholderTextColor="#94A3B8"
+              className="flex-1 border border-border rounded-xl px-4 py-3 text-sm text-text-primary bg-surface"
+              returnKeyType="done"
+              accessibilityLabel="Enter ingredient name"
+            />
+            <Pressable
+              onPress={handleAddManual}
+              className="w-12 h-12 bg-primary rounded-xl items-center justify-center"
+              accessibilityLabel="Add ingredient"
+            >
+              <Ionicons name="add" size={22} color="white" />
+            </Pressable>
+          </View>
+        </View>
+
+        {/* Meal Type */}
+        <View className="py-4 border-t border-border">
           <Text className="text-base font-semibold text-text-primary mb-3">Meal Type</Text>
           <View className="flex-row flex-wrap">
             {MEAL_TYPES.map((meal) => (
@@ -234,104 +379,6 @@ export default function SessionSetupScreen() {
           </View>
         </View>
 
-        {/* Ingredients via VLM */}
-        <View className="py-4 border-t border-border">
-          <Text className="text-base font-semibold text-text-primary mb-1">Ingredients (optional)</Text>
-          <Text className="text-sm text-text-secondary mb-3">
-            Photo your ingredients and we'll identify them, or add them manually.
-          </Text>
-
-          {/* Camera / Upload buttons */}
-          <View className="flex-row gap-3 mb-3">
-            <Pressable
-              onPress={handleCameraPress}
-              className="flex-1 border border-dashed border-border rounded-xl py-5 items-center active:bg-gray-50"
-              accessibilityLabel="Take photo of ingredients"
-            >
-              <Ionicons name="camera-outline" size={28} color="#64748B" />
-              <Text className="text-sm text-text-secondary mt-1">Camera</Text>
-            </Pressable>
-            <Pressable
-              onPress={handleUploadPress}
-              className="flex-1 border border-dashed border-border rounded-xl py-5 items-center active:bg-gray-50"
-              accessibilityLabel="Upload photo of ingredients"
-            >
-              <Ionicons name="image-outline" size={28} color="#64748B" />
-              <Text className="text-sm text-text-secondary mt-1">Upload</Text>
-            </Pressable>
-          </View>
-
-          {/* Identify button shown when images are loaded but not yet identified */}
-          {vlm.images.length > 0 && vlm.ingredients.length === 0 && !vlm.loading ? (
-            <Pressable
-              onPress={handleIdentify}
-              className="bg-primary py-3 rounded-xl items-center mb-3"
-            >
-              <Text className="text-white text-sm font-semibold">
-                Identify {vlm.images.length} Photo{vlm.images.length !== 1 ? 's' : ''}
-              </Text>
-            </Pressable>
-          ) : null}
-
-          {/* VLM loading state */}
-          {vlm.loading ? (
-            <View className="flex-row items-center gap-2 py-3">
-              <ActivityIndicator size="small" color="#2563EB" />
-              <Text className="text-sm text-text-secondary">Identifying ingredients...</Text>
-            </View>
-          ) : null}
-
-          {/* VLM error */}
-          {vlm.error ? (
-            <Text className="text-sm text-red-500 mb-2">{vlm.error}</Text>
-          ) : null}
-
-          {/* Ingredient tags */}
-          {vlm.ingredients.length > 0 ? (
-            <View className="mb-3">
-              <Text className="text-sm font-medium text-text-secondary mb-2">
-                Tap to confirm or remove:
-              </Text>
-              <View className="flex-row flex-wrap">
-                {vlm.ingredients.map((ing) => (
-                  <IngredientTag
-                    key={ing.name}
-                    ingredient={ing}
-                    onConfirm={() => vlm.confirmIngredient(ing.name)}
-                    onRemove={() => vlm.removeIngredient(ing.name)}
-                  />
-                ))}
-              </View>
-            </View>
-          ) : null}
-
-          {/* Manual add */}
-          <View className="flex-row gap-2">
-            <TextInput
-              ref={manualInputRef}
-              value={manualIngredient}
-              onChangeText={setManualIngredient}
-              onSubmitEditing={handleAddManual}
-              onFocus={() => {
-                // Delay to let keyboard fully open before scrolling
-                setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 350);
-              }}
-              placeholder="Add ingredient manually..."
-              placeholderTextColor="#94A3B8"
-              className="flex-1 border border-border rounded-xl px-4 py-3 text-sm text-text-primary bg-surface"
-              returnKeyType="done"
-              accessibilityLabel="Enter ingredient name"
-            />
-            <Pressable
-              onPress={handleAddManual}
-              className="w-12 h-12 bg-primary rounded-xl items-center justify-center"
-              accessibilityLabel="Add ingredient"
-            >
-              <Ionicons name="add" size={22} color="white" />
-            </Pressable>
-          </View>
-        </View>
-
         <View className="h-4" />
       </ScrollView>
 
@@ -344,23 +391,17 @@ export default function SessionSetupScreen() {
 }
 
 function IngredientTag({ ingredient, onConfirm, onRemove }) {
-  const isUrgent = ingredient.urgency != null && ingredient.urgency <= PERISHABLE_URGENCY_DAYS;
   const isConfirmed = ingredient.confirmed;
 
   return (
     <View className={'flex-row items-center rounded-full px-3 py-1.5 mr-2 mb-2 border ' + (
-      isUrgent
-        ? 'bg-orange-50 border-orange-300'
-        : isConfirmed
-          ? 'bg-green-50 border-green-300'
-          : 'bg-gray-50 border-border'
+      isConfirmed
+        ? 'bg-green-50 border-green-300'
+        : 'bg-gray-50 border-border'
     )}>
-      {isUrgent ? (
-        <Ionicons name="alert-circle-outline" size={14} color="#C2410C" style={{ marginRight: 4 }} />
-      ) : null}
       <Pressable onPress={isConfirmed ? undefined : onConfirm} accessibilityLabel={'Confirm ' + ingredient.name}>
         <Text className={'text-sm font-medium ' + (
-          isUrgent ? 'text-orange-700' : isConfirmed ? 'text-green-700' : 'text-text-secondary'
+          isConfirmed ? 'text-green-700' : 'text-text-secondary'
         )}>
           {ingredient.name}
           {ingredient.estimated_quantity && ingredient.estimated_quantity > 0
@@ -369,7 +410,7 @@ function IngredientTag({ ingredient, onConfirm, onRemove }) {
         </Text>
       </Pressable>
       <Pressable onPress={onRemove} className="ml-1.5" accessibilityLabel={'Remove ' + ingredient.name}>
-        <Ionicons name="close-circle" size={16} color={isUrgent ? '#C2410C' : '#94A3B8'} />
+        <Ionicons name="close-circle" size={16} color="#94A3B8" />
       </Pressable>
     </View>
   );

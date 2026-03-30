@@ -2,6 +2,9 @@
  * Recipe generation loading screen.
  * Shown after session setup while the pipeline runs.
  * Navigates to discover on success, shows error with retry on failure.
+ *
+ * Delivery-tracker style: polls /api/recommend/status every 1.2 s and
+ * shows real pipeline stages (brainstorm → search → rank → ready).
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -12,57 +15,94 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSession } from '../../src/context/SessionContext';
 import { useAuth } from '../../src/context/AuthContext';
 import { useRecipeContext } from '../../src/context/RecipeContext';
+import { getPipelineStatus } from '../../src/services/pipelineService';
 
-const STAGES = [
-  'Analyzing your ingredients...',
-  'Brainstorming recipe ideas...',
-  'Finding real recipes...',
-  'Ranking the best matches...',
-  'Almost ready...',
+const PIPELINE_STEPS = [
+  { step: 1, icon: 'bulb-outline',    label: 'Brainstorming recipe ideas',    verb: 'Thinking'  },
+  { step: 2, icon: 'search-outline',  label: 'Searching the web for recipes', verb: 'Searching' },
+  { step: 3, icon: 'star-outline',    label: 'Ranking the best matches',      verb: 'Ranking'   },
+  { step: 4, icon: 'checkmark-circle-outline', label: 'Recipes ready!',        verb: 'Done'      },
 ];
 
-const STAGE_INTERVAL_MS = 4000;
+const POLL_INTERVAL_MS = 1200;
 
 export default function GeneratingScreen() {
   const router = useRouter();
   const { ensureRegistered } = useAuth();
-  const { session, getSessionContext, updateSession } = useSession();
+  const { getSessionContext } = useSession();
   const { recipes, loading, error, startPipeline } = useRecipeContext();
-  const [stageIndex, setStageIndex] = useState(0);
+  const [pipelineStatus, setPipelineStatus] = useState({ step: 0, label: '', detail: '', total_steps: 4 });
   const hasStarted = useRef(false);
   const hasNavigated = useRef(false);
+  const didStartLoading = useRef(false);
+  const pollRef = useRef(null);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
 
   useEffect(() => {
     if (hasStarted.current) return;
     hasStarted.current = true;
 
     (async () => {
-      // Lazy-register with backend on first server-dependent action
       await ensureRegistered();
       const ctx = getSessionContext();
       startPipeline(ctx);
     })();
   }, []);
 
+  // Track that our pipeline actually started loading
   useEffect(() => {
-    if (!loading) return;
-    const timer = setInterval(() => {
-      setStageIndex((prev) => (prev < STAGES.length - 1 ? prev + 1 : prev));
-    }, STAGE_INTERVAL_MS);
-    return () => clearInterval(timer);
+    if (loading) {
+      didStartLoading.current = true;
+    }
   }, [loading]);
 
+  // Poll pipeline status while loading
   useEffect(() => {
-    if (!loading && recipes.length > 0 && !hasNavigated.current) {
+    if (!loading) {
+      stopPolling();
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        const status = await getPipelineStatus();
+        if (status && typeof status.step === 'number') {
+          setPipelineStatus(status);
+        }
+      } catch {
+        // Silently ignore — status is a nice-to-have
+      }
+    };
+
+    poll(); // immediate first call
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    return stopPolling;
+  }, [loading]);
+
+  // Navigate only once the NEW pipeline has completed
+  useEffect(() => {
+    if (
+      didStartLoading.current &&
+      !loading &&
+      recipes.length > 0 &&
+      !hasNavigated.current
+    ) {
       hasNavigated.current = true;
       router.replace('/(tabs)/discover');
     }
   }, [loading, recipes.length, router]);
 
   const handleRetry = () => {
-    setStageIndex(0);
+    setPipelineStatus({ step: 0, label: '', detail: '', total_steps: 4 });
     hasStarted.current = false;
     hasNavigated.current = false;
+    didStartLoading.current = false;
     const ctx = getSessionContext();
     startPipeline(ctx);
   };
@@ -105,26 +145,71 @@ export default function GeneratingScreen() {
     );
   }
 
+  const currentStep = pipelineStatus.step;
+
   return (
     <SafeAreaView className="flex-1 bg-background">
-      <View className="flex-1 items-center justify-center px-8">
-        <View className="w-24 h-24 rounded-full bg-blue-50 items-center justify-center mb-8">
-          <ActivityIndicator size="large" color="#2563EB" />
-        </View>
-        <Text className="text-2xl font-bold text-text-primary mb-3 text-center">
-          Finding recipes just for you
+      <View className="flex-1 justify-center px-8">
+
+        {/* Header */}
+        <Text className="text-2xl font-bold text-text-primary mb-8 text-center">
+          Finding recipes for you
         </Text>
-        <Text className="text-base text-text-secondary text-center mb-8 leading-6">
-          {STAGES[stageIndex]}
-        </Text>
-        <View className="flex-row items-center gap-1.5">
-          {STAGES.map((_, i) => (
-            <View
-              key={i}
-              className={'w-2 h-2 rounded-full ' + (i <= stageIndex ? 'bg-primary' : 'bg-gray-200')}
-            />
-          ))}
+
+        {/* Delivery-tracker steps */}
+        <View className="mb-10">
+          {PIPELINE_STEPS.map((s, idx) => {
+            const isDone    = currentStep > s.step;
+            const isActive  = currentStep === s.step;
+            const isPending = currentStep < s.step;
+
+            return (
+              <View key={s.step}>
+                {/* Step row */}
+                <View className="flex-row items-center">
+                  {/* Icon / indicator */}
+                  <View className={'w-10 h-10 rounded-full items-center justify-center mr-4 ' + (
+                    isDone   ? 'bg-green-100' :
+                    isActive ? 'bg-blue-100' :
+                               'bg-gray-100'
+                  )}>
+                    {isDone ? (
+                      <Ionicons name="checkmark" size={20} color="#16A34A" />
+                    ) : isActive ? (
+                      <ActivityIndicator size="small" color="#2563EB" />
+                    ) : (
+                      <Ionicons name={s.icon} size={18} color="#CBD5E1" />
+                    )}
+                  </View>
+
+                  {/* Label + detail */}
+                  <View className="flex-1">
+                    <Text className={'text-base ' + (
+                      isDone   ? 'text-text-secondary line-through' :
+                      isActive ? 'font-semibold text-text-primary' :
+                                 'text-text-secondary'
+                    )}>
+                      {s.label}
+                    </Text>
+                    {isActive && pipelineStatus.detail ? (
+                      <Text className="text-xs text-primary mt-0.5">
+                        {pipelineStatus.detail}
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+
+                {/* Connector line (not after last step) */}
+                {idx < PIPELINE_STEPS.length - 1 ? (
+                  <View className={'w-0.5 h-6 ml-5 my-0.5 ' + (
+                    currentStep > s.step ? 'bg-green-300' : 'bg-gray-200'
+                  )} />
+                ) : null}
+              </View>
+            );
+          })}
         </View>
+
       </View>
     </SafeAreaView>
   );

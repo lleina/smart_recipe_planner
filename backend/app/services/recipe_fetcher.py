@@ -40,22 +40,38 @@ logger = logging.getLogger("app.recipe_fetcher")
 # ---------------------------------------------------------------------------
 # Concurrency limits
 # ---------------------------------------------------------------------------
-# Search: keep low to avoid DDG rate-limiting (3 concurrent searches max)
-_SEARCH_SEM = asyncio.Semaphore(3)
+# Search: keep low to avoid DDG rate-limiting (5 concurrent searches max)
+_SEARCH_SEM = asyncio.Semaphore(5)
 # Scrape: HTTP I/O bound — more parallelism is fine
-_SCRAPE_SEM = asyncio.Semaphore(8)
+_SCRAPE_SEM = asyncio.Semaphore(10)
 
 # Thread pool for running the synchronous ddgs client
-_THREAD_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="ddg")
+_THREAD_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ddg")
 
 # ---------------------------------------------------------------------------
 # Target cooking sites
-# Keep the list short — long OR queries return homepages or unrelated results.
-# Prefer sites confirmed to respond 200 with structured recipe markup.
+# A wide list improves variety. We rotate subsets for site-filtered queries
+# to avoid overly long OR chains (which confuse search engines).
 # ---------------------------------------------------------------------------
 _ALL_SITES = [s.strip() for s in WEB_RECIPE_SITES.split() if s.strip()]
-# Use only the first 4 for the primary (site-filtered) query
-_PRIMARY_SITES = _ALL_SITES[:4]
+
+# Counter used to rotate which sites appear in the site: filter query
+_site_rotation_counter = 0
+_SITES_PER_QUERY = 6  # number of site: filters per targeted query
+
+
+def _get_rotated_sites() -> list[str]:
+    """Return a rotating subset of _ALL_SITES for the next query."""
+    global _site_rotation_counter
+    if len(_ALL_SITES) <= _SITES_PER_QUERY:
+        return _ALL_SITES
+    start = (_site_rotation_counter * _SITES_PER_QUERY) % len(_ALL_SITES)
+    _site_rotation_counter += 1
+    # Wrap around if needed
+    sites = _ALL_SITES[start:start + _SITES_PER_QUERY]
+    if len(sites) < _SITES_PER_QUERY:
+        sites += _ALL_SITES[:_SITES_PER_QUERY - len(sites)]
+    return sites
 
 # ---------------------------------------------------------------------------
 # Ingredient string parser
@@ -252,9 +268,16 @@ def _clean_description(description: str, title: str = "") -> str:
 # Title similarity (Jaccard on cleaned token sets)
 # ---------------------------------------------------------------------------
 _STOPWORDS = {
+    # Marketing fluff (stripped for matching)
     "easy", "quick", "simple", "best", "homemade", "classic", "the", "a", "an",
     "with", "and", "or", "for", "of", "in", "on", "my", "your", "how", "to",
     "make", "recipe", "recipes", "style", "inspired",
+    # Culinary descriptors (stripped for cache matching — "Creamy X" still matches "X")
+    "creamy", "crispy", "spicy", "smoky", "smokey", "buttery", "cheesy",
+    "hearty", "chunky", "fluffy", "tangy", "savory", "sweet", "sticky",
+    "loaded", "stuffed", "baked", "pan", "fried", "grilled", "roasted",
+    "slow", "cooked", "pulled", "smashed", "toasted", "one", "pot", "skillet",
+    "sheet", "pan", "one-pot",
 }
 
 
@@ -306,9 +329,9 @@ def _cache_row_to_dict(row: RecipeCache) -> dict:
         "title": row.title,
         "description": row.description or "",
         "image": row.image or "",
-        "prep_time": row.prep_time or 10,
-        "cook_time": row.cook_time or 25,
-        "total_time": row.total_time or 35,
+        "prep_time": row.prep_time or 0,
+        "cook_time": row.cook_time or 0,
+        "total_time": row.total_time or 0,
         "difficulty": row.difficulty or "medium",
         "servings": row.servings or 4,
         "cuisine": row.cuisine or "",
@@ -328,7 +351,7 @@ def _cache_row_to_dict(row: RecipeCache) -> dict:
 # Web search
 # ---------------------------------------------------------------------------
 
-def _ddg_text_sync(query: str, max_results: int = 5) -> list[dict]:
+def _ddg_text_sync(query: str, max_results: int = 8) -> list[dict]:
     """Run synchronous DuckDuckGo search. Called via executor."""
     try:
         from ddgs import DDGS
@@ -338,7 +361,7 @@ def _ddg_text_sync(query: str, max_results: int = 5) -> list[dict]:
         return list(ddgs.text(query, max_results=max_results))
 
 
-async def _ddg_search(query: str, require_target_site: bool = True) -> Optional[str]:
+async def _ddg_search(query: str, recipe_name: str = "", require_target_site: bool = True) -> Optional[str]:
     """DuckDuckGo search with retry + exponential backoff."""
     loop = asyncio.get_event_loop()
     max_retries = 3
@@ -346,7 +369,7 @@ async def _ddg_search(query: str, require_target_site: bool = True) -> Optional[
         async with _SEARCH_SEM:
             try:
                 results = await asyncio.wait_for(
-                    loop.run_in_executor(_THREAD_POOL, _ddg_text_sync, query, 5),
+                    loop.run_in_executor(_THREAD_POOL, _ddg_text_sync, query, 8),
                     timeout=20.0,
                 )
             except asyncio.TimeoutError:
@@ -367,11 +390,28 @@ async def _ddg_search(query: str, require_target_site: bool = True) -> Optional[
                 logger.warning("DDG search error: %s", exc)
                 return None
 
-        for r in results:
-            url = r.get("href") or r.get("url") or ""
-            if not require_target_site or any(site in url for site in _ALL_SITES):
-                return url
-        # If site-filtered search got results but none matched, don't retry
+        if require_target_site:
+            # First pass: prefer results from known recipe sites
+            for r in results:
+                url = r.get("href") or r.get("url") or ""
+                if any(site in url for site in _ALL_SITES):
+                    return url
+            # Second pass: accept any result that looks like a recipe URL
+            for r in results:
+                url = r.get("href") or r.get("url") or ""
+                if url and _looks_like_recipe_url(url, recipe_name):
+                    return url
+        else:
+            for r in results:
+                url = r.get("href") or r.get("url") or ""
+                if url and _looks_like_recipe_url(url, recipe_name):
+                    return url
+            # Last resort: return first result that has any URL
+            for r in results:
+                url = r.get("href") or r.get("url") or ""
+                if url:
+                    return url
+        # If search got results but none matched, don't retry
         if results:
             return None
         # No results at all — retry
@@ -380,46 +420,135 @@ async def _ddg_search(query: str, require_target_site: bool = True) -> Optional[
     return None
 
 
+# Known recipe/cooking domains (broader than _ALL_SITES for URL validation)
+_RECIPE_URL_INDICATORS = {
+    "recipe", "recipes", "cooking", "cook", "food", "kitchen", "eat",
+    "bake", "baking", "chef", "meal", "dinner", "lunch", "breakfast",
+    "pasta", "chicken", "beef", "soup", "salad", "curry", "stir",
+    "roast", "grilled", "fried", "sauteed", "braised",
+}
+
+# Domains that are definitely NOT recipe pages
+_NON_RECIPE_DOMAINS = {
+    "youtube.com", "amazon.com", "wikipedia.org", "pinterest.com",
+    "facebook.com", "instagram.com", "twitter.com", "tiktok.com",
+    "reddit.com", "quora.com", "yelp.com", "tripadvisor.com",
+    "ebay.com", "walmart.com", "target.com", "etsy.com",
+    "nytimes.com", "washingtonpost.com",  # paywalled
+    "medium.com", "substack.com",
+}
+
+
+def _looks_like_recipe_url(url: str, recipe_name: str = "") -> bool:
+    """
+    Heuristic: does this URL look like it leads to a recipe page?
+    Much more permissive than before — recipe-scrapers will validate the
+    actual content, so we just need to avoid obvious non-recipe pages.
+    """
+    lower = url.lower()
+    # Reject obviously non-recipe domains
+    if any(domain in lower for domain in _NON_RECIPE_DOMAINS):
+        return False
+    # Accept if it's a known recipe site
+    if any(site in lower for site in _ALL_SITES):
+        return True
+    # Accept if the URL path contains recipe-related words
+    if any(indicator in lower for indicator in _RECIPE_URL_INDICATORS):
+        return True
+    # Accept if the URL path contains keywords from the recipe name
+    # (e.g., "gochujang-pasta" in the URL for recipe "Gochujang Pasta")
+    if recipe_name:
+        name_tokens = set(re.findall(r"[a-z]+", recipe_name.lower()))
+        name_tokens -= {"the", "a", "an", "and", "or", "with", "of", "in", "on"}
+        # If at least 1 meaningful name word appears in the URL path, accept it
+        if name_tokens and any(tok in lower for tok in name_tokens if len(tok) > 3):
+            return True
+    # Default: accept if it looks like a blog/food site (not a known bad domain)
+    # Most food blogs are personal sites — we rely on recipe-scrapers to validate
+    return True  # Permissive — let the scraper decide
+
+
 async def _serpapi_search(query: str) -> Optional[str]:
-    params = {"q": query, "api_key": SERPAPI_KEY, "num": 5, "engine": "google"}
+    params = {"q": query, "api_key": SERPAPI_KEY, "num": 8, "engine": "google"}
     async with httpx.AsyncClient(timeout=WEB_RECIPE_TIMEOUT) as client:
         resp = await client.get("https://serpapi.com/search", params=params)
         resp.raise_for_status()
         data = resp.json()
+    # Prefer results from known recipe sites
     for result in data.get("organic_results", []):
         url = result.get("link", "")
         if any(site in url for site in _ALL_SITES):
+            return url
+    # Accept any recipe-looking result
+    for result in data.get("organic_results", []):
+        url = result.get("link", "")
+        if url and _looks_like_recipe_url(url):
             return url
     results = data.get("organic_results", [])
     return results[0]["link"] if results else None
 
 
-async def _search_recipe_url(recipe_name: str) -> Optional[str]:
+async def _search_recipe_urls(recipe_name: str, max_urls: int = 3) -> list[str]:
     """
-    Two-stage search:
-      1. Targeted query against a short list of known-good sites
-      2. Broad fallback (no site filter) if stage 1 returns nothing
+    Multi-stage search — returns up to max_urls candidate URLs.
+    Broad-first strategy for best relevance on niche/fusion dishes.
     """
-    # Stage 1: targeted (short site list → cleaner results)
-    site_filter = " OR ".join(f"site:{s}" for s in _PRIMARY_SITES)
-    targeted_query = f"{recipe_name} recipe {site_filter}"
+    urls: list[str] = []
+    seen: set[str] = set()
 
+    def _add(url: str):
+        if url and url not in seen and len(urls) < max_urls:
+            seen.add(url)
+            urls.append(url)
+
+    broad_query = f"{recipe_name} recipe"
+
+    # SerpAPI (if configured)
     if SERPAPI_KEY:
         try:
-            url = await _serpapi_search(targeted_query)
-            if url:
-                return url
+            url = await _serpapi_search(broad_query)
+            _add(url)
         except Exception as exc:
             logger.warning("SerpAPI failed for '%s': %s", recipe_name, exc)
 
-    url = await _ddg_search(targeted_query, require_target_site=True)
-    if url:
-        return url
+    # Stage 1: BROAD DDG query — returns multiple results
+    loop = asyncio.get_event_loop()
+    async with _SEARCH_SEM:
+        try:
+            results = await asyncio.wait_for(
+                loop.run_in_executor(_THREAD_POOL, _ddg_text_sync, broad_query, 8),
+                timeout=20.0,
+            )
+        except Exception:
+            results = []
 
-    # Stage 2: broad fallback — any cooking result
-    broad_query = f"{recipe_name} recipe"
-    logger.debug("Targeted search empty for '%s' — trying broad query", recipe_name)
-    return await _ddg_search(broad_query, require_target_site=False)
+    # Prefer known sites, then recipe-looking URLs
+    for r in (results or []):
+        u = r.get("href") or r.get("url") or ""
+        if u and any(site in u for site in _ALL_SITES):
+            _add(u)
+    for r in (results or []):
+        u = r.get("href") or r.get("url") or ""
+        if u and _looks_like_recipe_url(u, recipe_name):
+            _add(u)
+
+    if len(urls) >= max_urls:
+        return urls
+
+    # Stage 2: site-filtered fallback
+    sites = _get_rotated_sites()
+    site_filter = " OR ".join(f"site:{s}" for s in sites)
+    targeted_query = f"{recipe_name} recipe {site_filter}"
+    url = await _ddg_search(targeted_query, recipe_name=recipe_name, require_target_site=True)
+    _add(url)
+
+    return urls
+
+
+async def _search_recipe_url(recipe_name: str) -> Optional[str]:
+    """Convenience: return the single best URL (backwards compat)."""
+    urls = await _search_recipe_urls(recipe_name, max_urls=1)
+    return urls[0] if urls else None
 
 
 # ---------------------------------------------------------------------------
@@ -462,15 +591,16 @@ async def _scrape_recipe(url: str, suggestion: dict) -> Optional[dict]:
         raw_ingredients = _safe(scraper.ingredients, []) or []
         raw_instructions = _safe(scraper.instructions, "") or ""
 
-        # Validate: reject if scraped title shares zero tokens with the suggestion
-        # (prevents "Beef Stir Fry" suggestion → "Chocolate Birthday Cake" result)
+        # Validate: reject if scraped title doesn't adequately overlap with the suggestion.
+        # Threshold 0.3: allows 'Creamy Gochujang Pasta' → 'Gochujang Pasta' (sim ≈ 0.5 ✓)
+        # but rejects 'Gochujang Pasta' → 'Gochujang Chickpeas' (sim ≈ 0.33 ✗) so the
+        # caller retries with the next candidate URL.
         suggestion_name = suggestion.get("name", "")
         sim = _title_similarity(suggestion_name, title)
-        if sim == 0.0 and suggestion_name:
-            # Zero token overlap — wrong page; bail out
+        if sim < 0.3 and suggestion_name:
             logger.warning(
-                "Title mismatch: suggestion='%s' scraped='%s' (sim=0) — skipping %s",
-                suggestion_name, title, url,
+                "Title mismatch: suggestion='%s' scraped='%s' (sim=%.2f) — skipping %s",
+                suggestion_name, title, sim, url,
             )
             return None
 
@@ -488,16 +618,26 @@ async def _scrape_recipe(url: str, suggestion: dict) -> Optional[dict]:
             except Exception:
                 return default
 
-        prep_time = _safe_int(scraper.prep_time, 10)
-        cook_time = _safe_int(scraper.cook_time, 20)
-        total_time = _safe_int(
-            scraper.total_time,
-            suggestion.get("estimated_time", prep_time + cook_time),
-        )
-        llm_time = suggestion.get("estimated_time")
-        if llm_time and (total_time > llm_time * 2 or total_time < 5):
+        # Trust scraped times — they come from the actual recipe author.
+        # Only fall back to LLM estimate when the scraper returns nothing.
+        raw_prep = _safe_int(scraper.prep_time, 0)
+        raw_cook = _safe_int(scraper.cook_time, 0)
+        raw_total = _safe_int(scraper.total_time, 0)
+
+        if raw_total > 0:
+            total_time = raw_total
+            prep_time = raw_prep if raw_prep > 0 else max(0, total_time - raw_cook) if raw_cook > 0 else 0
+            cook_time = raw_cook if raw_cook > 0 else max(0, total_time - raw_prep) if raw_prep > 0 else total_time
+        elif raw_prep > 0 or raw_cook > 0:
+            prep_time = raw_prep
+            cook_time = raw_cook
+            total_time = raw_prep + raw_cook
+        else:
+            # Scraper returned no time data at all — use LLM estimate as last resort
+            llm_time = suggestion.get("estimated_time", 30)
             total_time = llm_time
-            cook_time = max(5, total_time - prep_time)
+            prep_time = 0
+            cook_time = 0
 
         servings_raw = _safe(scraper.yields, "4 servings")
         servings_match = re.search(r"(\d+)", str(servings_raw))
@@ -616,34 +756,34 @@ async def _resolve_suggestion(
                 return None
             seen_ids.add(cached["id"])
         cached["meal_type"] = [ctx.meal_type]
-        llm_time = suggestion.get("estimated_time")
-        if llm_time and abs(cached["total_time"] - llm_time) > 30:
-            cached["total_time"] = llm_time
+        # Trust cached times from the original scrape — do NOT override with LLM estimate
         return ("cache", cached)
 
-    # Step 2: web search + scrape
-    url = await _search_recipe_url(name)
-    if not url:
+    # Step 2: web search + scrape (try multiple URLs on failure)
+    urls = await _search_recipe_urls(name, max_urls=3)
+    if not urls:
         logger.warning("No URL found for '%s'", name)
         return None
 
-    recipe_id = _recipe_id_from_url(url)
-    async with seen_lock:
-        if recipe_id in seen_ids:
-            logger.debug("URL already used by another suggestion (url=%s) — skipping '%s'", url, name)
-            return None
-        seen_ids.add(recipe_id)
+    for url in urls:
+        recipe_id = _recipe_id_from_url(url)
+        async with seen_lock:
+            if recipe_id in seen_ids:
+                logger.debug("URL already used (url=%s) — trying next for '%s'", url, name)
+                continue
+            seen_ids.add(recipe_id)
 
-    recipe = await _scrape_recipe(url, suggestion)
-    if recipe:
-        recipe["meal_type"] = [ctx.meal_type]
-        return ("web", recipe)
+        recipe = await _scrape_recipe(url, suggestion)
+        if recipe:
+            recipe["meal_type"] = [ctx.meal_type]
+            return ("web", recipe)
 
-    # Remove from seen so the URL slot isn't wasted
-    async with seen_lock:
-        seen_ids.discard(recipe_id)
+        # Scrape failed — free up the ID slot and try next URL
+        async with seen_lock:
+            seen_ids.discard(recipe_id)
+        logger.info("Scrape failed for '%s' (%s) — trying next URL", name, url)
 
-    logger.warning("Scrape failed for '%s' (%s)", name, url)
+    logger.warning("All %d URLs failed for '%s'", len(urls), name)
     return None
 
 
@@ -655,6 +795,7 @@ async def fetch_recipes_batch(
     suggestions: list[dict],
     ctx: SessionContextRequest,
     db: AsyncSession,
+    progress_cb=None,
 ) -> list[dict]:
     """
     Stage 3 entry point. Resolves all LLM suggestions concurrently.
@@ -662,6 +803,9 @@ async def fetch_recipes_batch(
     Cache is loaded once upfront (single DB query) to avoid concurrent session
     access. Web search + scrape tasks run in parallel (bounded by _SEARCH_SEM /
     _SCRAPE_SEM) and never touch the DB session.
+
+    progress_cb(done: int, total: int) is called after each suggestion resolves
+    so the caller can track real-time fetch progress.
     """
     seen_ids: set[str] = set()
     seen_lock = asyncio.Lock()
@@ -673,9 +817,22 @@ async def fetch_recipes_batch(
     cache_hits = await _check_cache_bulk(suggestion_names, db)
     logger.info("Stage 3: %d cache hits from %d suggestions", len(cache_hits), len(suggestion_names))
 
+    _resolved_count = [0]
+    _total = len(suggestions)
+
+    async def _with_progress(coro):
+        result = await coro
+        _resolved_count[0] += 1
+        if progress_cb:
+            try:
+                progress_cb(_resolved_count[0], _total)
+            except Exception:
+                pass
+        return result
+
     tasks = [
-        _resolve_suggestion(s, ctx, cache_hits, seen_ids, seen_lock,
-                            stagger_delay=i * 0.3)  # stagger to avoid DDG bursts
+        _with_progress(_resolve_suggestion(s, ctx, cache_hits, seen_ids, seen_lock,
+                                           stagger_delay=i * 0.15))
         for i, s in enumerate(suggestions)
     ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)

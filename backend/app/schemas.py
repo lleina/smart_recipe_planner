@@ -125,6 +125,12 @@ class RecipeOut(BaseModel):
     ingredients: list[dict] = []
     instructions: list[dict] = []
     score: float = 0.0
+    # Ingredient-match metadata for card UI
+    ingredient_match_pct: float = 0.0
+    matched_ingredient_count: int = 0
+    total_ingredient_count: int = 0
+    missing_key_ingredients: list[str] = []
+    swap_suggestions: list[dict] = []
 
 
 class RecommendResponse(BaseModel):

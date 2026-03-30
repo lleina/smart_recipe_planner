@@ -29,11 +29,21 @@ WEB_RECIPE_TIMEOUT = int(os.getenv("WEB_RECIPE_TIMEOUT", "10"))
 
 # Space-separated list of cooking site domains to target in web searches.
 # recipe-scrapers supports all of these with structured data extraction.
+# A wide list improves variety; the fetcher rotates subsets per query.
 WEB_RECIPE_SITES = os.getenv(
     "WEB_RECIPE_SITES",
-    "budgetbytes.com recipetineats.com skinnytaste.com tasty.co cookingclassy.com "
-    "cafedelites.com therecipecritic.com natashaskitchen.com gimmesomeoven.com "
-    "damndelicious.net halfbakedharvest.com iwashyoudry.com"
+    "allrecipes.com food.com foodnetwork.com simplyrecipes.com "
+    "budgetbytes.com recipetineats.com skinnytaste.com tasty.co "
+    "cookingclassy.com cafedelites.com therecipecritic.com natashaskitchen.com "
+    "gimmesomeoven.com damndelicious.net halfbakedharvest.com iwashyoudry.com "
+    "seriouseats.com bonappetit.com epicurious.com delish.com "
+    "thepioneerwoman.com pinchofyum.com loveandlemons.com cookieandkate.com "
+    "minimalistbaker.com hostthetoast.com smittenkitchen.com "
+    "thekitchn.com food52.com taste.com.au bbcgoodfood.com "
+    "onceuponachef.com spendwithpennies.com tasteofhome.com "
+    "marthastewart.com eatingwell.com myrecipes.com "
+    "inspiredtaste.net justonecookbook.com woksoflife.com "
+    "maangchi.com indianhealthyrecipes.com "
 )
 
 # ---------------------------------------------------------------------------

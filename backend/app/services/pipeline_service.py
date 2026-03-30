@@ -36,7 +36,34 @@ from app.database import async_session as db_session_factory
 # Cards returned per page (per "Load More")
 BATCH_SIZE = 5
 # Suggestions resolved before the first response is sent; rest run in background
-INITIAL_FETCH_SIZE = 10
+INITIAL_FETCH_SIZE = 15
+
+# ---------------------------------------------------------------------------
+# In-memory pipeline status — lets the generating screen show real progress.
+# Keyed by user_id (one pipeline per user at a time).
+# ---------------------------------------------------------------------------
+_user_pipeline_status: dict[str, dict] = {}
+
+
+def _set_status(user_id: str, step: int, label: str, detail: str = "") -> None:
+    """Update the pipeline status for a user."""
+    _user_pipeline_status[user_id] = {
+        "step": step,
+        "label": label,
+        "detail": detail,
+        "total_steps": 4,
+    }
+
+
+def get_pipeline_status(user_id: str) -> dict:
+    """Return the current pipeline stage for a user (for polling endpoint)."""
+    return _user_pipeline_status.get(user_id, {
+        "step": 0, "label": "Starting up…", "detail": "", "total_steps": 4,
+    })
+
+
+def clear_pipeline_status(user_id: str) -> None:
+    _user_pipeline_status.pop(user_id, None)
 
 
 async def run_pipeline(
@@ -58,7 +85,12 @@ async def run_pipeline(
     health_goal = (preferences.health_goal or "none") if preferences else "none"
     history_titles = [h.recipe_id for h in history[:10]]
 
+    # Clear any previous status and start fresh
+    clear_pipeline_status(user_id)
+
     # Stage 2: LLM ideation
+    _set_status(user_id, 1, "Brainstorming recipe ideas",
+                f"{len(session_context.available_ingredients)} ingredient(s) · {session_context.meal_type}")
     logger.info(
         "[%s] Stage 2: LLM ideation (meal=%s, time=%dmin, ingredients=%d)",
         user_id[:8], session_context.meal_type,
@@ -78,14 +110,25 @@ async def run_pipeline(
     rest_suggestions = suggestions[INITIAL_FETCH_SIZE:]
 
     # Stage 3a: Fast fetch — first INITIAL_FETCH_SIZE suggestions only
+    _set_status(user_id, 2, "Searching the web for recipes",
+                f"Looking up {len(first_suggestions)} recipe ideas…")
     logger.info(
         "[%s] Stage 3a: fast fetch — %d suggestions (remaining %d deferred to background)",
         user_id[:8], len(first_suggestions), len(rest_suggestions),
     )
-    recipes_raw = await recipe_fetcher.fetch_recipes_batch(first_suggestions, session_context, db)
+
+    def _fetch_progress(done: int, total: int) -> None:
+        _set_status(user_id, 2, "Searching the web for recipes",
+                    f"Found {done} of {total} recipes")
+
+    recipes_raw = await recipe_fetcher.fetch_recipes_batch(
+        first_suggestions, session_context, db, progress_cb=_fetch_progress
+    )
 
     # Stage 4: Ranking
     effective_mode = ranking_mode_override or RANKING_MODE
+    _set_status(user_id, 3, "Ranking the best matches",
+                f"Scoring {len(recipes_raw)} recipes for you")
     logger.info("[%s] Stage 4: ranking %d recipes (mode=%s)", user_id[:8], len(recipes_raw), effective_mode)
     ranked = await ranking_service.rank_recipes(
         recipes=recipes_raw,
@@ -137,9 +180,9 @@ async def run_pipeline(
             title=r["title"],
             description=r.get("description", ""),
             image=r.get("image", ""),
-            prep_time=r.get("prep_time", 10),
-            cook_time=r.get("cook_time", 25),
-            total_time=r.get("total_time", 35),
+            prep_time=r.get("prep_time", 0),
+            cook_time=r.get("cook_time", 0),
+            total_time=r.get("total_time", 0),
             difficulty=r.get("difficulty", "medium"),
             servings=r.get("servings", session_context.serving_count),
             cuisine=r.get("cuisine", ""),
@@ -171,6 +214,9 @@ async def run_pipeline(
     )
 
     # Stage 3b: Fire background task for remaining suggestions
+    # Report pool_size including expected background additions so the
+    # frontend knows more recipes are on the way and keeps "Next" enabled.
+    expected_total = len(ranked) + len(rest_suggestions)
     if rest_suggestions:
         asyncio.create_task(
             _background_fetch_and_append(
@@ -185,10 +231,11 @@ async def run_pipeline(
             )
         )
 
+    _set_status(user_id, 4, "Recipes ready!", f"Found {min(BATCH_SIZE, len(ranked))} great matches")
     return RecommendResponse(
         session_pool_id=pool.id,
         recipes=[_to_out(r) for r in ranked[:BATCH_SIZE]],
-        pool_size=len(ranked),
+        pool_size=expected_total,
         shown_count=min(BATCH_SIZE, len(ranked)),
         ranking_mode_used=effective_mode,
     )
@@ -254,9 +301,9 @@ async def _background_fetch_and_append(
                     title=r["title"],
                     description=r.get("description", ""),
                     image=r.get("image", ""),
-                    prep_time=r.get("prep_time", 10),
-                    cook_time=r.get("cook_time", 25),
-                    total_time=r.get("total_time", 35),
+                    prep_time=r.get("prep_time", 0),
+                    cook_time=r.get("cook_time", 0),
+                    total_time=r.get("total_time", 0),
                     difficulty=r.get("difficulty", "medium"),
                     servings=r.get("servings", 4),
                     cuisine=r.get("cuisine", ""),
@@ -402,8 +449,8 @@ async def _bg_full_refetch(
                 cached = RecipeCache(
                     id=r["id"], title=r["title"],
                     description=r.get("description", ""), image=r.get("image", ""),
-                    prep_time=r.get("prep_time", 10), cook_time=r.get("cook_time", 25),
-                    total_time=r.get("total_time", 35), difficulty=r.get("difficulty", "medium"),
+                    prep_time=r.get("prep_time", 0), cook_time=r.get("cook_time", 0),
+                    total_time=r.get("total_time", 0), difficulty=r.get("difficulty", "medium"),
                     servings=r.get("servings", 4), cuisine=r.get("cuisine", ""),
                     meal_type=r.get("meal_type", []), occasions=r.get("occasions", []),
                     rating=r.get("rating", 4.0), source=r.get("source", "web"),
@@ -437,11 +484,14 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
 
     # Guard: if nothing unshown yet (background fetch still in progress),
     # return empty rather than issuing an invalid SQL IN () query.
+    # Report pool_size as total pool entries (including unshown) so the
+    # frontend knows more data may still arrive.
     if not batch_ids:
+        effective_pool_size = max(pool.total_fetched or 0, len(pool_recipes))
         return NextBatchResponse(
             recipes=[],
             shown_count=pool.shown_count or 0,
-            pool_size=pool.total_fetched or 0,
+            pool_size=effective_pool_size,
             refetch_triggered=False,
         )
 
@@ -458,11 +508,28 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
         select(RecipeCache).where(RecipeCache.id.in_(batch_ids))
     )
     cached = {rc.id: rc for rc in result.scalars().all()}
-    recipes_out = [
-        _to_out(_recipe_cache_to_dict(cached[rid]))
-        for rid in batch_ids
-        if rid in cached
-    ]
+
+    # Recompute ingredient match info so later pages show the same stats as page 1
+    session_ctx = None
+    if pool.session_context:
+        try:
+            session_ctx = SessionContextRequest(**pool.session_context)
+        except Exception:
+            pass
+    available_tokens = None
+    if session_ctx:
+        from app.services.ranking_service import compute_ingredient_match, _build_available_token_set
+        available_tokens = _build_available_token_set(session_ctx.available_ingredients)
+
+    recipes_out = []
+    for rid in batch_ids:
+        if rid not in cached:
+            continue
+        rdict = _recipe_cache_to_dict(cached[rid])
+        if session_ctx and available_tokens is not None:
+            match_info = compute_ingredient_match(rdict, session_ctx, available_tokens)
+            rdict.update(match_info)
+        recipes_out.append(_to_out(rdict))
 
     # Trigger unlimited re-ideation when pool is nearly empty
     # (after current batch is served, fewer than BATCH_SIZE unshown remain)
@@ -556,9 +623,9 @@ def _to_out(r: dict) -> RecipeOut:
         title=r["title"],
         description=r.get("description", ""),
         image=r.get("image", ""),
-        prep_time=r.get("prep_time", 10),
-        cook_time=r.get("cook_time", 25),
-        total_time=r.get("total_time", 35),
+        prep_time=r.get("prep_time", 0),
+        cook_time=r.get("cook_time", 0),
+        total_time=r.get("total_time", 0),
         difficulty=r.get("difficulty", "medium"),
         servings=r.get("servings", 4),
         cuisine=r.get("cuisine", ""),
@@ -570,4 +637,9 @@ def _to_out(r: dict) -> RecipeOut:
         ingredients=r.get("ingredients", []),
         instructions=r.get("instructions", []),
         score=r.get("score", 0.0),
+        ingredient_match_pct=r.get("ingredient_match_pct", 0.0),
+        matched_ingredient_count=r.get("matched_ingredient_count", 0),
+        total_ingredient_count=r.get("total_ingredient_count", 0),
+        missing_key_ingredients=r.get("missing_key_ingredients", []),
+        swap_suggestions=r.get("swap_suggestions", []),
     )

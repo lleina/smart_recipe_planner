@@ -12,7 +12,7 @@ from app.schemas import (
     RerankRequest, RerankResponse, RecipeOut,
 )
 from app.auth import get_current_user_id
-from app.services.pipeline_service import run_pipeline, get_next_batch, rerank_pool
+from app.services.pipeline_service import run_pipeline, get_next_batch, rerank_pool, get_pipeline_status
 
 router = APIRouter(prefix="/api", tags=["recommend"])
 
@@ -66,6 +66,14 @@ async def next_batch(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     return await get_next_batch(pool, db)
+
+
+@router.get("/recommend/status")
+async def pipeline_status(
+    user_id: str = Depends(get_current_user_id),
+):
+    """Returns the current pipeline stage for the authenticated user."""
+    return get_pipeline_status(user_id)
 
 
 @router.post("/rerank", response_model=RerankResponse)
