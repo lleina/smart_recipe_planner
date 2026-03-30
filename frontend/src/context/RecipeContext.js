@@ -1,24 +1,40 @@
 /**
- * Shared recipe state provider.
+ * Recipe discovery state provider.
  *
- * Page-based architecture:
+ * Architecture — page-based pagination with eager prefetch:
  *
- *   All fetched recipes accumulate in `recipes[]`. The UI shows one page of
- *   PAGE_SIZE (5) at a time, controlled by `currentPage` (0-indexed).
+ *   All fetched recipes accumulate in ``recipes[]``. The UI shows one page of
+ *   PAGE_SIZE (5) at a time, controlled by ``currentPage`` (0-indexed).
  *
- *   After page 1 loads, a background prefetch eagerly pulls the next batch
- *   from the backend and appends it to `recipes[]`, so navigating forward
- *   is usually instant.
+ *   After page 1 loads, the prefetcher eagerly pulls the next 8 pages from the
+ *   backend pool in the background so forward navigation is almost always
+ *   instant. The prefetcher uses exponential back-off when the pool is still
+ *   being populated (background web scraping still in progress).
  *
- *   shownIdsRef  — Set of every recipe ID ever fetched. No-repeat guarantee.
+ *   ``shownIdsRef`` — Set of every recipe ID ever delivered to the UI.
+ *   Guarantees no recipe is shown twice within a session.
+ *
+ * Ref mirrors:
+ *   ``recipesRef`` and ``currentPageRef`` mirror their corresponding state
+ *   values for use inside async callbacks (closures capture the ref, not the
+ *   stale state). This is the canonical pattern for async state access in
+ *   React — see coding_standards.md §6.1.
  *
  * Substitution pre-fetching:
- *   prefetchSubstitutions(recipeId, recipeIngredients, userIngredients) is
- *   called from discover.js when each card is rendered. Results cached so
- *   recipe detail reads from cache immediately.
+ *   ``prefetchSubstitutions()`` is called as each card enters the viewport.
+ *   Results are cached in ``substitutionsCache`` so the Recipe Detail screen
+ *   can display substitution data with zero LLM wait.
  */
 
-import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useAuth } from './AuthContext';
 import { useSession } from './SessionContext';
 import { getRecommendations, getNextBatch, rerankPool } from '../services/pipelineService';
@@ -34,6 +50,11 @@ const PREFETCH_MAX_RETRIES = 20;
 // Buffer all available recipes aggressively (backend generates ~40 = 8 pages)
 const PAGES_AHEAD = 8;
 
+/**
+ * Provides recipe discovery state and navigation actions to the component tree.
+ *
+ * @param {{ children: React.ReactNode }} props
+ */
 export function RecipeProvider({ children }) {
   const { user } = useAuth();
   const { session, updateSession, batchAddShownRecipeIds } = useSession();
@@ -62,7 +83,18 @@ export function RecipeProvider({ children }) {
   const recipesRef = useRef([]);   // mirrors recipes state for async closures
   const currentPageRef = useRef(0);  // mirrors currentPage for async closures
 
-  // ── Internal: continuously prefetch batches until PAGES_AHEAD pages are buffered ─
+  // ── Prefetch loop ────────────────────────────────────────────────────────
+  /**
+   * Continuously fetch recipe batches from the backend pool until
+   * PAGES_AHEAD full pages are buffered beyond the current page.
+   *
+   * Uses exponential back-off (up to 5 s) when the pool is still being
+   * populated by the background web-scraping task. Stops automatically once
+   * the buffer target is met or PREFETCH_MAX_RETRIES consecutive empty
+   * responses are received.
+   *
+   * @param {string} poolId - The session pool ID to fetch from.
+   */
   const _prefetchNextBatch = useCallback(async (poolId) => {
     if (prefetchingRef.current || !poolId) return;
     prefetchingRef.current = true;
@@ -132,7 +164,19 @@ export function RecipeProvider({ children }) {
     setIsBuffering(false);
   }, [batchAddShownRecipeIds]);
 
-  // ── startPipeline ─────────────────────────────────────────────────────────
+  // ── Pipeline start ────────────────────────────────────────────────────────
+  /**
+   * Start a new recipe recommendation pipeline for the given session context.
+   *
+   * Resets all recipe and pagination state, calls the backend pipeline, loads
+   * the first page of results, and immediately begins background prefetching
+   * of subsequent pages.
+   *
+   * Guards against duplicate calls — a second call while the pipeline is
+   * running is silently ignored.
+   *
+   * @param {object} sessionContext - Session parameters (meal type, time, ingredients, etc.)
+   */
   const startPipeline = useCallback(async (sessionContext) => {
     if (pipelineRunning.current) {
       console.warn('[RecipeContext] startPipeline already running — ignoring duplicate call');
@@ -212,9 +256,6 @@ export function RecipeProvider({ children }) {
 
   // ── Auto-advance page when pending and new recipes arrive ─────────────────
   const prevRecipesLenRef = useRef(0);
-  useMemo(() => {
-    prevRecipesLenRef.current = recipes.length;
-  }, [recipes.length]);
 
   // ── nextPage ──────────────────────────────────────────────────────────────
   const nextPage = useCallback(async () => {
@@ -297,12 +338,15 @@ export function RecipeProvider({ children }) {
     });
   }, [session.sessionPoolId, _prefetchNextBatch, poolInfo.poolSize]);
 
-  // Track recipes growth
+  // Watch recipes.length growth and schedule a pending-page advance check.
+  // useEffect (not useMemo) because this is a side effect — it calls
+  // setTimeout and mutates lastRecipesLen.current — not a derived value.
   const lastRecipesLen = useRef(0);
-  useMemo(() => {
+  useEffect(() => {
     if (recipes.length > lastRecipesLen.current) {
       lastRecipesLen.current = recipes.length;
-      // Schedule advance check after render
+      // Schedule the advance check after the render that updated recipes[]
+      // so recipesRef.current is fully up-to-date when handleRecipesGrew runs.
       setTimeout(handleRecipesGrew, 0);
     }
   }, [recipes.length, handleRecipesGrew]);
@@ -412,10 +456,16 @@ export function RecipeProvider({ children }) {
   );
 }
 
+/**
+ * Hook to consume RecipeContext.
+ *
+ * @returns {object} Recipe state and navigation actions from the nearest RecipeProvider.
+ * @throws {Error} If called outside a RecipeProvider.
+ */
 export const useRecipeContext = () => {
   const context = useContext(RecipeContext);
   if (!context) {
-    throw new Error('useRecipeContext must be used within a RecipeProvider');
+    throw new Error('useRecipeContext must be used inside a RecipeProvider');
   }
   return context;
 };
