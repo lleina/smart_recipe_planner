@@ -1,22 +1,29 @@
 """
-Model-agnostic inference client.
+Model-agnostic inference client for OpenAI-compatible LLM / VLM backends.
 
-Returns an AsyncOpenAI client pointed at any OpenAI-compatible endpoint.
-Supported backends (set via config):
-  - Ollama:     base_url="http://localhost:11434/v1",  api_key="ollama"
-  - vLLM:       base_url="http://localhost:8001/v1",   api_key="EMPTY"
-  - LMDeploy:   base_url="http://localhost:23333/v1",  api_key="EMPTY"
-  - LocalAI:    base_url="http://localhost:8080/v1",   api_key="localai"
-  - TGI:        base_url="http://localhost:8080/v1",   api_key="EMPTY"
+Two interfaces are provided:
 
-The api_key is required by the openai package but ignored by local servers;
-any non-empty string works.
+``get_client(base_url, api_key)``
+    Returns a standard ``AsyncOpenAI`` client. Use this for non-Ollama
+    backends (vLLM, LMDeploy, LocalAI, TGI) that fully honour the OpenAI API.
 
-For Ollama thinking models (qwen3.5, qwen3, deepseek-r1, etc.) the OpenAI-
-compatible /v1 endpoint does not honour the `think: false` parameter, causing
-all tokens to be consumed by internal reasoning with an empty content field.
-Use `ollama_chat()` instead, which calls the native /api/chat endpoint and
-passes `think: false` to suppress reasoning mode entirely.
+``ollama_chat(base_url, model, messages, ...)``
+    Calls Ollama's **native** ``/api/chat`` endpoint directly. This is
+    required instead of the OpenAI-compatible ``/v1`` endpoint because:
+
+    1. The ``think: false`` option is only honoured by the native endpoint.
+       Without it, thinking models (qwen3, deepseek-r1) spend all tokens on
+       internal reasoning and return an empty content field.
+    2. Images are passed via the native ``images`` field (base64 list), which
+       is more reliable than OpenAI-style ``image_url`` content blocks for
+       local vision models.
+
+Supported backends:
+    Ollama:   ``base_url="http://localhost:11434/v1"``, ``api_key="ollama"``
+    vLLM:     ``base_url="http://localhost:8001/v1"``,  ``api_key="EMPTY"``
+    LMDeploy: ``base_url="http://localhost:23333/v1"``, ``api_key="EMPTY"``
+    LocalAI:  ``base_url="http://localhost:8080/v1"``,  ``api_key="localai"``
+    TGI:      ``base_url="http://localhost:8080/v1"``,  ``api_key="EMPTY"``
 """
 
 import httpx
@@ -24,15 +31,18 @@ from openai import AsyncOpenAI
 
 
 def get_client(base_url: str, api_key: str = "local") -> AsyncOpenAI:
-    """
-    Returns an AsyncOpenAI client configured for the given base URL.
+    """Return an ``AsyncOpenAI`` client configured for the given base URL.
 
-    :param base_url: Full base URL of the OpenAI-compatible server,
-                     e.g. "http://localhost:11434/v1"
-    :param api_key:  API key string. Ignored by local servers but required
-                     by the openai package. Default "local" works for all
-                     self-hosted backends.
-    :returns: Configured AsyncOpenAI client.
+    The ``api_key`` is required by the ``openai`` package but is ignored by
+    all self-hosted backends — any non-empty string works.
+
+    Args:
+        base_url: Full base URL of the OpenAI-compatible server,
+            e.g. ``"http://localhost:11434/v1"``.
+        api_key: API key string (required by openai SDK; ignored locally).
+
+    Returns:
+        An ``AsyncOpenAI`` client ready for chat completions and embeddings.
     """
     return AsyncOpenAI(base_url=base_url, api_key=api_key)
 
@@ -46,32 +56,39 @@ async def ollama_chat(
     timeout: float = 120.0,
     think: bool = False,
 ) -> str:
-    """
-    Call Ollama's native /api/chat endpoint directly.
+    """Call Ollama's native ``/api/chat`` endpoint and return the response text.
 
-    Unlike the OpenAI-compatible /v1 endpoint, this honours the `think`
-    parameter, allowing thinking mode to be disabled for structured output
-    tasks (recipe ideation, re-ranking) where reasoning wastes all tokens.
+    Unlike the OpenAI-compatible ``/v1/chat/completions`` endpoint, the native
+    endpoint honours the ``think`` parameter, allowing reasoning mode to be
+    disabled for structured-output tasks (recipe ideation, re-ranking) where
+    thinking tokens produce no useful content.
 
-    :param base_url:    Ollama base URL including /v1 suffix (stripped here),
-                        e.g. "http://localhost:11434/v1" → "http://localhost:11434"
-    :param model:       Model name as registered in Ollama, e.g. "qwen3.5:4b"
-    :param messages:    List of {"role": …, "content": …} dicts.
-    :param max_tokens:  Maximum tokens to generate (mapped to num_predict).
-    :param temperature: Sampling temperature.
-    :param timeout:     HTTP request timeout in seconds.
-    :param think:       Whether to enable chain-of-thought reasoning.
-                        False = no thinking, content populated immediately.
-    :returns: The assistant message content string.
-    :raises httpx.TimeoutException: If the request exceeds `timeout`.
-    :raises ValueError: If the response contains no content.
+    Args:
+        base_url: Ollama endpoint URL — may include a ``/v1`` suffix (stripped
+            internally), e.g. ``"http://localhost:11434/v1"``.
+        model: Model name as registered in Ollama, e.g. ``"qwen3:4b"``.
+        messages: List of ``{"role": ..., "content": ...}`` message dicts.
+            For vision requests, include ``"images": [<base64_str>, ...]``.
+        max_tokens: Maximum tokens to generate (mapped to ``num_predict``).
+        temperature: Sampling temperature (higher = more creative).
+        timeout: HTTP request timeout in seconds.
+        think: Whether to enable chain-of-thought reasoning. ``False``
+            suppresses thinking and populates ``content`` immediately.
+
+    Returns:
+        The assistant's response content string.
+
+    Raises:
+        httpx.TimeoutException: If the request exceeds ``timeout`` seconds.
+        httpx.HTTPStatusError: If Ollama returns a non-2xx HTTP status.
+        ValueError: If the response contains an empty or missing content field.
     """
-    # Strip /v1 suffix to get the Ollama server root
+    # Strip the /v1 suffix if present — the native /api/chat lives at the root.
     ollama_root = base_url.rstrip("/")
     if ollama_root.endswith("/v1"):
         ollama_root = ollama_root[:-3]
 
-    payload = {
+    request_payload = {
         "model": model,
         "messages": messages,
         "think": think,
@@ -82,12 +99,17 @@ async def ollama_chat(
         },
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(f"{ollama_root}/api/chat", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    async with httpx.AsyncClient(timeout=timeout) as http_client:
+        response = await http_client.post(
+            f"{ollama_root}/api/chat", json=request_payload
+        )
+        response.raise_for_status()
+        response_data = response.json()
 
-    content = data.get("message", {}).get("content", "") or ""
-    if not content.strip():
-        raise ValueError(f"Ollama returned empty content for model {model!r}")
-    return content
+    assistant_content: str = response_data.get("message", {}).get("content", "") or ""
+    if not assistant_content.strip():
+        raise ValueError(
+            f"Ollama returned empty content for model {model!r}. "
+            "The model may be warming up or thinking mode may be suppressing output."
+        )
+    return assistant_content
