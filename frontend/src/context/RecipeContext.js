@@ -31,8 +31,8 @@ const RecipeContext = createContext(null);
 const PAGE_SIZE = RECIPE_BATCH_SIZE; // 5
 const PREFETCH_RETRY_DELAY_MS = 1500;
 const PREFETCH_MAX_RETRIES = 20;
-// Number of pages to keep buffered ahead of the user's current page
-const PAGES_AHEAD = 3;
+// Buffer all available recipes aggressively (backend generates ~40 = 8 pages)
+const PAGES_AHEAD = 8;
 
 export function RecipeProvider({ children }) {
   const { user } = useAuth();
@@ -101,8 +101,8 @@ export function RecipeProvider({ children }) {
           }));
           batchAddShownRecipeIds(incoming.map((r) => r.id));
           consecutiveEmpties = 0; // reset on success
-          // Small delay between successful fetches to avoid hammering backend
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          // Minimal delay between successful fetches — get all recipes fast
+          await new Promise((resolve) => setTimeout(resolve, 100));
         } else {
           // 0 new recipes — backend pool may still be populating.
           // Update poolSize (never decrease) so hasNextPage stays accurate.
