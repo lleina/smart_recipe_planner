@@ -366,9 +366,11 @@ fetching subsequent pages from the backend pool in the background. The
 
 ### 11.2 Unlimited Re-Ideation
 
-When the session pool runs low (fewer than 5 unshown recipes remain after
+When the session pool runs low (fewer than **15 unshown recipes** remain after
 serving a page), the backend **automatically triggers a new LLM ideation
-round** in the background. The new round:
+round** in the background. The threshold is set to 3× the page size so the
+user always has at least two full pages buffered before the new fetch
+completes. The new round:
 
 1. Queries the LLM for 40 fresh recipe suggestions
 2. Excludes all previously seen recipe titles via the history list

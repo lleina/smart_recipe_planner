@@ -37,6 +37,12 @@ from app.database import async_session as db_session_factory
 BATCH_SIZE = 5
 # Suggestions resolved before the first response is sent; rest run in background
 INITIAL_FETCH_SIZE = 15
+# Trigger a background re-ideation round when fewer than this many unshown
+# recipes remain in the pool. Set to 3× BATCH_SIZE so the user always has at
+# least two full pages buffered before we kick off new LLM ideation.
+RE_IDEATION_TRIGGER_THRESHOLD = 15
+# Hard cap on re-ideation rounds per session to prevent runaway AI calls.
+MAX_REFETCH_ROUNDS = 20
 
 # ---------------------------------------------------------------------------
 # In-memory pipeline status — lets the generating screen show real progress.
@@ -340,141 +346,168 @@ async def _bg_full_refetch(
     pool_id: str,
     user_id: str,
     session_context_dict: dict,
-    existing_ids: set[str],
     refetch_index: int,
 ) -> None:
-    """
-    Fire a brand-new LLM ideation round using the same session context.
-    All previously fetched recipe IDs are excluded so only fresh recipes are added.
+    """Run a new LLM ideation round and append fresh recipes to the session pool.
+
+    Called automatically when the pool runs low on unshown recipes. Uses its
+    own DB session because the originating request session has already closed.
+
+    Previously seen recipe IDs are sourced **exclusively from a fresh DB query**
+    at execution time rather than from a snapshot captured at trigger time.
+    This is critical for correctness: multiple concurrent re-ideation rounds
+    could otherwise each use a stale snapshot and produce overlapping results.
+
+    Args:
+        pool_id: The session pool to append fresh recipes to.
+        user_id: Owner's user ID — used to load current preferences.
+        session_context_dict: Serialized ``SessionContextRequest`` (stored on
+            the pool row) used to reconstruct the original session context.
+        refetch_index: Which re-ideation round this is (1-based); used in logs.
     """
     logger.info(
-        "[bg-refetch/%s] Starting re-ideation #%d (excluding %d known recipes)",
-        pool_id[:8], refetch_index, len(existing_ids),
+        "[bg-refetch/%s] Starting re-ideation round #%d",
+        pool_id[:8], refetch_index,
     )
     try:
-        from app.schemas import SessionContextRequest
-        ctx = SessionContextRequest(**session_context_dict)
+        session_context = SessionContextRequest(**session_context_dict)
 
         async with db_session_factory() as db:
-            # Load user prefs for cuisine/equipment/dietary
-            from app.models import UserPreferences, CookHistory, SavedRecipe
-            prefs_result = await db.execute(
+            user_prefs_result = await db.execute(
                 select(UserPreferences).where(UserPreferences.user_id == user_id)
             )
-            prefs = prefs_result.scalar_one_or_none()
-            dietary = list(prefs.dietary_restrictions or []) if prefs else []
-            cuisines = list(prefs.cuisine_preferences or []) if prefs else []
-            equipment = list(prefs.cooking_equipment or []) if prefs else []
-            health_goal = (prefs.health_goal or "none") if prefs else "none"
+            user_prefs = user_prefs_result.scalar_one_or_none()
+            dietary_restrictions = list(user_prefs.dietary_restrictions or []) if user_prefs else []
+            cuisine_preferences = list(user_prefs.cuisine_preferences or []) if user_prefs else []
+            cooking_equipment = list(user_prefs.cooking_equipment or []) if user_prefs else []
+            health_goal = (user_prefs.health_goal or "none") if user_prefs else "none"
 
-            # Get current shown recipe titles to avoid repeating them
+            # Fresh pool query — captures every recipe added since the trigger fired,
+            # including those from concurrent re-ideation rounds.
             pool_result = await db.execute(
                 select(SessionPool).where(SessionPool.id == pool_id)
             )
-            pool = pool_result.scalar_one_or_none()
-            if not pool:
+            session_pool = pool_result.scalar_one_or_none()
+            if not session_pool:
                 logger.warning("[bg-refetch/%s] Pool not found — aborting", pool_id[:8])
                 return
 
-            current_ids = {r["recipeId"] for r in (pool.recipes or [])}
-            all_excluded = existing_ids | current_ids
+            already_seen_ids = {
+                recipe_slot["recipeId"]
+                for recipe_slot in (session_pool.recipes or [])
+            }
 
-            # Get titles of all already-fetched recipes so LLM avoids suggesting them
-            if all_excluded:
-                cache_result = await db.execute(
-                    select(RecipeCache.title).where(RecipeCache.id.in_(all_excluded))
+            # Fetch titles for the exclusion list so the LLM doesn't suggest recipes
+            # the user has already seen in this session.
+            if already_seen_ids:
+                titles_result = await db.execute(
+                    select(RecipeCache.title).where(RecipeCache.id.in_(already_seen_ids))
                 )
-                shown_titles = [row[0] for row in cache_result.all()]
+                already_seen_titles = [row[0] for row in titles_result.all()]
             else:
-                shown_titles = []
+                already_seen_titles = []
 
             logger.info(
-                "[bg-refetch/%s] Excluding %d shown titles from new ideation",
-                pool_id[:8], len(shown_titles),
+                "[bg-refetch/%s] Excluding %d already-seen titles from ideation",
+                pool_id[:8], len(already_seen_titles),
             )
 
-            # New ideation round — LLM will avoid previously seen recipes via history
             new_suggestions = await llm_service.ideate_recipes(
-                context=ctx,
-                dietary_restrictions=dietary,
-                cuisine_preferences=cuisines,
+                context=session_context,
+                dietary_restrictions=dietary_restrictions,
+                cuisine_preferences=cuisine_preferences,
                 health_goal=health_goal,
-                history_titles=shown_titles,
-                cooking_equipment=equipment,
+                history_titles=already_seen_titles,
+                cooking_equipment=cooking_equipment,
             )
 
             if not new_suggestions:
                 logger.warning("[bg-refetch/%s] Re-ideation produced 0 suggestions", pool_id[:8])
                 return
 
-            # Fetch recipes for new suggestions
-            new_recipes_raw = await recipe_fetcher.fetch_recipes_batch(new_suggestions, ctx, db)
-
+            new_recipes_raw = await recipe_fetcher.fetch_recipes_batch(
+                new_suggestions, session_context, db
+            )
             if not new_recipes_raw:
-                logger.info("[bg-refetch/%s] Re-fetch resolved 0 recipes", pool_id[:8])
+                logger.info("[bg-refetch/%s] Web fetch resolved 0 recipes", pool_id[:8])
                 return
 
-            # Rank
-            ranked = await ranking_service.rank_recipes(
+            ranked_new_recipes = await ranking_service.rank_recipes(
                 recipes=new_recipes_raw,
-                context=ctx,
-                dietary_restrictions=dietary,
-                cuisine_preferences=cuisines,
-                cooking_equipment=equipment,
+                context=session_context,
+                dietary_restrictions=dietary_restrictions,
+                cuisine_preferences=cuisine_preferences,
+                cooking_equipment=cooking_equipment,
                 mode=RANKING_MODE,
             )
 
-            # Reload pool (may have changed during fetch)
-            pool_result2 = await db.execute(
+            # Re-query pool to pick up any changes made while we were fetching.
+            fresh_pool_result = await db.execute(
                 select(SessionPool).where(SessionPool.id == pool_id)
             )
-            pool = pool_result2.scalar_one_or_none()
-            if not pool:
+            session_pool = fresh_pool_result.scalar_one_or_none()
+            if not session_pool:
                 return
 
-            current_pool = list(pool.recipes or [])
-            current_ids2 = {r["recipeId"] for r in current_pool}
-            new_entries = []
-            for r in ranked:
-                if r["id"] in current_ids2 or r["id"] in all_excluded:
+            current_pool_slots = list(session_pool.recipes or [])
+            # Rebuild seen-ID set from latest pool state to prevent duplicates
+            # across concurrent re-ideation rounds.
+            current_pool_ids = {slot["recipeId"] for slot in current_pool_slots}
+
+            new_pool_slots: list[dict] = []
+            for ranked_recipe in ranked_new_recipes:
+                if ranked_recipe["id"] in current_pool_ids:
                     continue
-                current_ids2.add(r["id"])
-                new_entries.append({
-                    "recipeId": r["id"],
-                    "score": r.get("score", 0.0),
+                current_pool_ids.add(ranked_recipe["id"])
+                new_pool_slots.append({
+                    "recipeId": ranked_recipe["id"],
+                    "score": ranked_recipe.get("score", 0.0),
                     "status": "unshown",
                     "shownAt": None,
-                    "rankPosition": len(current_pool) + len(new_entries) + 1,
+                    "rankPosition": len(current_pool_slots) + len(new_pool_slots) + 1,
                 })
-                cached = RecipeCache(
-                    id=r["id"], title=r["title"],
-                    description=r.get("description", ""), image=r.get("image", ""),
-                    prep_time=r.get("prep_time", 0), cook_time=r.get("cook_time", 0),
-                    total_time=r.get("total_time", 0), difficulty=r.get("difficulty", "medium"),
-                    servings=r.get("servings", 4), cuisine=r.get("cuisine", ""),
-                    meal_type=r.get("meal_type", []), occasions=r.get("occasions", []),
-                    rating=r.get("rating", 4.0), source=r.get("source", "web"),
-                    source_url=r.get("source_url", ""),
-                    cooking_equipment=r.get("cooking_equipment", []),
-                    ingredients=r.get("ingredients", []),
-                    instructions=r.get("instructions", []),
-                )
-                await db.merge(cached)
+                await db.merge(RecipeCache(
+                    id=ranked_recipe["id"],
+                    title=ranked_recipe["title"],
+                    description=ranked_recipe.get("description", ""),
+                    image=ranked_recipe.get("image", ""),
+                    prep_time=ranked_recipe.get("prep_time", 0),
+                    cook_time=ranked_recipe.get("cook_time", 0),
+                    total_time=ranked_recipe.get("total_time", 0),
+                    difficulty=ranked_recipe.get("difficulty", "medium"),
+                    servings=ranked_recipe.get("servings", 4),
+                    cuisine=ranked_recipe.get("cuisine", ""),
+                    meal_type=ranked_recipe.get("meal_type", []),
+                    occasions=ranked_recipe.get("occasions", []),
+                    rating=ranked_recipe.get("rating", 4.0),
+                    source=ranked_recipe.get("source", "web"),
+                    source_url=ranked_recipe.get("source_url", ""),
+                    cooking_equipment=ranked_recipe.get("cooking_equipment", []),
+                    ingredients=ranked_recipe.get("ingredients", []),
+                    instructions=ranked_recipe.get("instructions", []),
+                ))
 
-            if new_entries:
-                pool.recipes = current_pool + new_entries
-                pool.total_fetched = (pool.total_fetched or 0) + len(new_entries)
-                flag_modified(pool, "recipes")
+            if new_pool_slots:
+                session_pool.recipes = current_pool_slots + new_pool_slots
+                session_pool.total_fetched = (session_pool.total_fetched or 0) + len(new_pool_slots)
+                flag_modified(session_pool, "recipes")
                 await db.commit()
                 logger.info(
-                    "[bg-refetch/%s] Re-ideation #%d appended %d fresh recipes (pool total=%d)",
-                    pool_id[:8], refetch_index, len(new_entries), pool.total_fetched,
+                    "[bg-refetch/%s] Round #%d appended %d fresh recipes (pool total=%d)",
+                    pool_id[:8], refetch_index, len(new_pool_slots), session_pool.total_fetched,
                 )
             else:
-                logger.info("[bg-refetch/%s] Re-ideation #%d: no new unique recipes", pool_id[:8], refetch_index)
+                logger.info(
+                    "[bg-refetch/%s] Round #%d: all ranked recipes were already in pool",
+                    pool_id[:8], refetch_index,
+                )
 
-    except Exception as exc:
-        logger.error("[bg-refetch/%s] Re-ideation failed: %s", pool_id[:8], exc, exc_info=True)
+    except Exception as exc:  # pylint: disable=broad-except
+        # Top-level background task boundary — must not propagate.
+        logger.error(
+            "[bg-refetch/%s] Re-ideation round #%d failed: %s",
+            pool_id[:8], refetch_index, exc, exc_info=True,
+        )
 
 
 async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchResponse:
@@ -531,30 +564,31 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
             rdict.update(match_info)
         recipes_out.append(_to_out(rdict))
 
-    # Trigger unlimited re-ideation when pool is nearly empty
-    # (after current batch is served, fewer than BATCH_SIZE unshown remain)
+    # Trigger a re-ideation round when the pool is running low.
+    # Using RE_IDEATION_TRIGGER_THRESHOLD (15) instead of BATCH_SIZE (5) ensures
+    # we start fetching new recipes early enough that the user never stalls.
+    # _bg_full_refetch always re-queries the pool from the DB at execution time,
+    # so we do not need to capture the current ID set here — it would be stale
+    # by the time the background task runs, especially across concurrent rounds.
     remaining_unshown = len(unshown) - len(batch_ids)
-    MAX_REFETCHES = 20  # hard cap to avoid runaway
     if (
-        remaining_unshown < BATCH_SIZE
+        remaining_unshown < RE_IDEATION_TRIGGER_THRESHOLD
         and pool.session_context
-        and (pool.refetch_count or 0) < MAX_REFETCHES
+        and (pool.refetch_count or 0) < MAX_REFETCH_ROUNDS
     ):
         pool.refetch_count = (pool.refetch_count or 0) + 1
         flag_modified(pool, "refetch_count")
-        all_recipe_ids = {r["recipeId"] for r in pool_recipes}
         asyncio.create_task(
             _bg_full_refetch(
                 pool_id=pool.id,
                 user_id=pool.user_id,
                 session_context_dict=pool.session_context,
-                existing_ids=all_recipe_ids,
                 refetch_index=pool.refetch_count,
             )
         )
         logger.info(
-            "[%s] Pool running low (%d unshown) — firing re-ideation #%d in background",
-            pool.id[:8], remaining_unshown, pool.refetch_count,
+            "[%s] Pool running low (%d unshown < threshold %d) — firing re-ideation #%d",
+            pool.id[:8], remaining_unshown, RE_IDEATION_TRIGGER_THRESHOLD, pool.refetch_count,
         )
 
     shown_since_save = sum(1 for r in pool_recipes if r["status"] == "shown")
