@@ -63,6 +63,7 @@ export function RecipeProvider({ children }) {
   const [recipes, setRecipes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [llmWarning, setLlmWarning] = useState(null);
   const [poolInfo, setPoolInfo] = useState({ poolSize: 0, shownCount: 0 });
 
   // Current page index (0-based)
@@ -214,6 +215,7 @@ export function RecipeProvider({ children }) {
       setCurrentPage(0);
       updateSession({ sessionPoolId: result.sessionPoolId });
       setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount });
+      setLlmWarning(result.llmWarning || null);
       batchAddShownRecipeIds(firstPage.map((r) => r.id));
 
       trackEvent({
@@ -411,6 +413,7 @@ export function RecipeProvider({ children }) {
     setIsBuffering(false);
     setNextPagePending(false);
     setError(null);
+    setLlmWarning(null);
     setPoolInfo({ poolSize: 0, shownCount: 0 });
     setSubstitutionsCache({});
     shownIdsRef.current = new Set();
@@ -430,6 +433,7 @@ export function RecipeProvider({ children }) {
     hasPrevPage,
     loading,
     error,
+    llmWarning,
     poolInfo,
     isBuffering,
     nextPagePending,
@@ -443,7 +447,7 @@ export function RecipeProvider({ children }) {
   }), [
     recipes, currentPage, currentPageRecipes, totalPages,
     hasNextPage, hasPrevPage,
-    loading, error, poolInfo,
+    loading, error, llmWarning, poolInfo,
     isBuffering, nextPagePending,
     substitutionsCache,
     startPipeline, nextPage, prevPage, prefetchSubstitutions, rerank, resetRecipes,

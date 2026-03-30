@@ -247,6 +247,8 @@ class RecommendResponse(BaseModel):
     shown_count: int
     # Recorded for observability — enables A/B comparison between ranking modes.
     ranking_mode_used: Optional[str] = None
+    # Set when the LLM was unreachable and a static fallback list was used instead.
+    llm_warning: Optional[str] = None
 
 
 class NextBatchResponse(BaseModel):

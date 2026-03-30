@@ -103,7 +103,7 @@ async def run_pipeline(
         session_context.available_time_minutes,
         len(session_context.available_ingredients),
     )
-    suggestions = await llm_service.ideate_recipes(
+    suggestions, llm_warning = await llm_service.ideate_recipes(
         context=session_context,
         dietary_restrictions=dietary_restrictions,
         cuisine_preferences=cuisine_preferences,
@@ -244,6 +244,7 @@ async def run_pipeline(
         pool_size=expected_total,
         shown_count=min(BATCH_SIZE, len(ranked)),
         ranking_mode_used=effective_mode,
+        llm_warning=llm_warning,
     )
 
 
@@ -412,7 +413,7 @@ async def _bg_full_refetch(
                 pool_id[:8], len(already_seen_titles),
             )
 
-            new_suggestions = await llm_service.ideate_recipes(
+            new_suggestions, _ = await llm_service.ideate_recipes(
                 context=session_context,
                 dietary_restrictions=dietary_restrictions,
                 cuisine_preferences=cuisine_preferences,

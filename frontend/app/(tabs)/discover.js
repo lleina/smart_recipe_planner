@@ -34,6 +34,7 @@ export default function DiscoverScreen() {
     recipes,
     loading,
     error,
+    llmWarning,
     poolInfo,
     isBuffering,
     nextPagePending,
@@ -248,6 +249,12 @@ export default function DiscoverScreen() {
           renderItem={renderItem}
           ListHeaderComponent={
             <>
+              {llmWarning ? (
+                <View className="mb-2 py-3 bg-amber-50 border border-amber-200 rounded-xl flex-row items-center gap-2 px-4">
+                  <Ionicons name="information-circle-outline" size={16} color="#D97706" />
+                  <Text className="text-sm text-amber-800 flex-1">{llmWarning}</Text>
+                </View>
+              ) : null}
               {error ? (
                 <View className="mb-2 py-3 bg-red-50 border border-red-200 rounded-xl flex-row items-center gap-2 px-4">
                   <Ionicons name="warning-outline" size={16} color="#DC2626" />
