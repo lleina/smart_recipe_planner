@@ -1,10 +1,17 @@
 """
-LLM ideation service - generates recipe suggestions from user context.
+LLM ideation service — generates recipe name suggestions from session context.
 
-Uses any OpenAI-compatible text endpoint configured via LLM_BASE_URL and
-LLM_MODEL in config. Falls back to keyword list when LLM is not configured.
+Uses any OpenAI-compatible text endpoint configured via ``LLM_BASE_URL`` and
+``LLM_MODEL``. Falls back to a curated keyword list when the LLM is not
+configured, enabling development without a running Ollama instance.
 
-Default model: qwen3:4b (via Ollama).
+Public API:
+    ``ideate_recipes(context, dietary_restrictions, ...)``
+        Returns a list of ~25 recipe suggestion dicts for the pipeline.
+    ``suggest_substitutions(recipe_ingredients, user_ingredients)``
+        Returns ingredient match and substitution suggestions for a recipe card.
+
+Default model: qwen3:4b (via Ollama, native ``/api/chat`` endpoint).
 """
 
 import json
@@ -47,16 +54,27 @@ _QUALIFIER_RE = re.compile(
 )
 
 
-def _normalize_ingredient_name(raw: str) -> str:
-    """Strip brand names and quality qualifiers, returning the plain culinary name."""
-    # Iteratively strip until no more matches (handles stacked qualifiers like
-    # 'organic grass-fed ground beef')
-    prev = None
-    result = raw.strip()
-    while result != prev:
-        prev = result
-        result = _QUALIFIER_RE.sub("", result).strip()
-    return result or raw.strip()
+def _normalize_ingredient_name(raw_name: str) -> str:
+    """Strip brand names and quality qualifiers, returning the plain culinary name.
+
+    Iteratively applies the qualifier regex until no more matches are found.
+    This handles stacked qualifiers like ``"organic grass-fed ground beef"`` →
+    ``"ground beef"`` in two passes.
+
+    Args:
+        raw_name: Ingredient name as entered by the user or returned by the VLM,
+            potentially containing brand names or marketing adjectives.
+
+    Returns:
+        The plain culinary name a cookbook would use (e.g. ``"ground beef"``).
+        Falls back to the stripped input if the regex removes everything.
+    """
+    previous = None
+    normalized = raw_name.strip()
+    while normalized != previous:
+        previous = normalized
+        normalized = _QUALIFIER_RE.sub("", normalized).strip()
+    return normalized or raw_name.strip()
 
 
 def _extract_json(raw: str) -> str:
@@ -90,17 +108,30 @@ def _extract_json(raw: str) -> str:
     return raw
 
 
-def _fix_truncated_json_array(raw: str) -> str:
-    """Attempt to recover a truncated JSON array by finding the last complete object."""
-    # Find the last complete JSON object (ends with })
-    last_brace = raw.rfind("}")
-    if last_brace == -1:
-        return raw
-    # Truncate after the last complete object and close the array
-    truncated = raw[:last_brace + 1].rstrip().rstrip(",") + "\n]"
-    return truncated
+def _fix_truncated_json_array(raw_json: str) -> str:
+    """Attempt to recover a truncated JSON array by closing it at the last complete object.
 
+    The LLM occasionally truncates its output mid-array when approaching the
+    token limit. This function finds the last complete JSON object (the last
+    ``}``) and appends a closing bracket to produce valid JSON.
+
+    Args:
+        raw_json: Potentially truncated JSON array string starting with ``[``.
+
+    Returns:
+        A syntactically closed JSON array string. If no ``}`` is found,
+        returns the input unchanged (the caller will raise on ``json.loads``).
+    """
+    last_closing_brace_index = raw_json.rfind("}")
+    if last_closing_brace_index == -1:
+        return raw_json
+    return raw_json[:last_closing_brace_index + 1].rstrip().rstrip(",") + "\n]"
+
+
+# Number of recipe suggestions to generate per LLM ideation call.
 _IDEATION_COUNT = 25
+# Maximum attempts to call the LLM before falling back to the keyword list.
+_MAX_LLM_RETRIES = 3
 
 _SYSTEM_PROMPT = (
     "You are a recipe ideation assistant for an app whose goal is to get people "
@@ -149,6 +180,23 @@ def _build_user_prompt(
     history_titles: list[str],
     cooking_equipment: list[str] | None = None,
 ) -> str:
+    """Build the user-turn prompt for the LLM recipe ideation call.
+
+    Formats all session context fields into a structured prompt that specifies
+    the exact output format, ingredient constraints, and distribution rules the
+    LLM must follow.
+
+    Args:
+        context: The user's session context (meal type, time, ingredients, etc.).
+        dietary_restrictions: Hard constraints (e.g. "vegetarian", "gluten-free").
+        cuisine_preferences: Preferred cuisine types (soft guidance).
+        health_goal: User's health goal string (e.g. "high-protein").
+        history_titles: Titles of recently cooked recipes to exclude.
+        cooking_equipment: Available kitchen equipment for hard filtering.
+
+    Returns:
+        A formatted multi-section string ready to send as the ``user`` message.
+    """
     urgent = [
         f"{_normalize_ingredient_name(i.name)} (use within {i.urgency} day{'s' if i.urgency != 1 else ''})"
         for i in context.available_ingredients
@@ -331,43 +379,62 @@ async def ideate_recipes(
     history_titles: list[str],
     cooking_equipment: list[str] | None = None,
 ) -> list[dict]:
-    """
-    Calls the configured LLM to generate recipe suggestions.
-    Returns a list of dicts with keys: name, key_ingredients, cuisine, estimated_time.
-    Falls back to keyword-based suggestions when LLM is not configured.
+    """Generate recipe name suggestions using the configured LLM.
+
+    Calls the LLM up to ``_MAX_LLM_RETRIES + 1`` times, retrying on parse
+    errors or when too few suggestions are returned. Falls back to a curated
+    keyword list when the LLM is unavailable or all retries fail.
+
+    Args:
+        context: Session context (meal type, time budget, available ingredients).
+        dietary_restrictions: Hard constraints (e.g. "vegan", "gluten-free").
+        cuisine_preferences: Soft cuisine preferences for distribution guidance.
+        health_goal: User's stated health goal (e.g. "high-protein", "none").
+        history_titles: Recently cooked recipe titles to exclude from suggestions.
+        cooking_equipment: Available equipment for hard filtering in the prompt.
+
+    Returns:
+        List of suggestion dicts, each with keys:
+        ``name``, ``key_ingredients``, ``cuisine``, ``estimated_time``.
+        Typically ~25 items; may be fewer if the LLM or fallback returns less.
     """
     if not LLM_BASE_URL:
         logger.info("LLM_BASE_URL not set — returning fallback suggestions")
         return _fallback_suggestions(context)
 
-    MAX_RETRIES = 3
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(_MAX_LLM_RETRIES + 1):
         try:
             logger.info("Calling LLM (%s) for %d suggestions (meal=%s, time=%dmin) [attempt %d/%d]",
                         LLM_MODEL, _IDEATION_COUNT, context.meal_type,
                         context.available_time_minutes, attempt + 1, MAX_RETRIES + 1)
-            result = await _call_llm(
+            parsed_suggestions = await _call_llm(
                 context, dietary_restrictions, cuisine_preferences,
                 health_goal, history_titles, cooking_equipment or []
             )
-            if len(result) >= 5:
-                logger.info("LLM returned %d suggestions", len(result))
-                return result
+            if len(parsed_suggestions) >= 5:
+                logger.info("LLM returned %d suggestions", len(parsed_suggestions))
+                return parsed_suggestions
             logger.warning(
                 "LLM returned only %d suggestions (attempt %d/%d) — retrying",
-                len(result), attempt + 1, MAX_RETRIES + 1,
+                len(parsed_suggestions), attempt + 1, _MAX_LLM_RETRIES + 1,
             )
-        except (json.JSONDecodeError, ValueError) as e:
-            if attempt < MAX_RETRIES:
+        except (json.JSONDecodeError, ValueError) as parse_error:
+            if attempt < _MAX_LLM_RETRIES:
                 logger.warning(
                     "LLM parse error (%s: %s) — retrying (attempt %d/%d)",
-                    type(e).__name__, e, attempt + 1, MAX_RETRIES + 1,
+                    type(parse_error).__name__, parse_error,
+                    attempt + 1, _MAX_LLM_RETRIES + 1,
                 )
                 continue
-            logger.warning("LLM ideation failed after %d attempts (%s: %s) — using fallback",
-                           MAX_RETRIES + 1, type(e).__name__, e)
-        except Exception as e:
-            logger.warning("LLM ideation failed (%s: %s) — using fallback", type(e).__name__, e)
+            logger.warning(
+                "LLM ideation failed after %d attempts (%s: %s) — using fallback",
+                _MAX_LLM_RETRIES + 1, type(parse_error).__name__, parse_error,
+            )
+        except Exception as llm_error:  # pylint: disable=broad-except
+            logger.warning(
+                "LLM ideation failed (%s: %s) — using fallback",
+                type(llm_error).__name__, llm_error,
+            )
             break
     return _fallback_suggestions(context)
 
@@ -380,6 +447,28 @@ async def _call_llm(
     history_titles: list[str],
     cooking_equipment: list[str] | None = None,
 ) -> list[dict]:
+    """Call the LLM and parse the response into a list of suggestion dicts.
+
+    Applies JSON extraction and truncation recovery before parsing. Normalises
+    the ``estimated_time`` field from either an integer or a string like
+    ``"25 minutes"`` to a plain integer.
+
+    Args:
+        context: Session context for the ideation prompt.
+        dietary_restrictions: Hard dietary constraints.
+        cuisine_preferences: Soft cuisine preferences.
+        health_goal: User's health goal string.
+        history_titles: Recipe titles to exclude from suggestions.
+        cooking_equipment: Available kitchen equipment.
+
+    Returns:
+        List of normalised suggestion dicts ready for the pipeline.
+
+    Raises:
+        json.JSONDecodeError: If the LLM response cannot be parsed as JSON
+            even after truncation recovery.
+        ValueError: If the LLM returns empty content.
+    """
     user_prompt = _build_user_prompt(
         context, dietary_restrictions, cuisine_preferences, health_goal, history_titles,
         cooking_equipment=cooking_equipment or [],
@@ -415,35 +504,35 @@ async def _call_llm(
         logger.warning("Primary parse failed — attempting inline truncation recovery")
         suggestions = json.loads(recovered)  # raise if still broken
 
-    # Normalise keys and drop malformed entries
-    result = []
-    for s in suggestions:
-        if not isinstance(s, dict) or not s.get("name"):
+    # Normalise keys and drop malformed entries.
+    # estimated_time may arrive as "25 minutes" or 25 — always coerce to int.
+    parsed_suggestions: list[dict] = []
+    for raw_suggestion in suggestions:
+        if not isinstance(raw_suggestion, dict) or not raw_suggestion.get("name"):
             continue
-        # estimated_time may come as "25 minutes" or 25 — extract the integer
-        raw_time = s.get("estimated_time", context.available_time_minutes)
+        raw_time = raw_suggestion.get("estimated_time", context.available_time_minutes)
         if isinstance(raw_time, str):
-            digits = re.search(r"\d+", raw_time)
-            raw_time = int(digits.group()) if digits else context.available_time_minutes
-        result.append({
-            "name": str(s["name"]),
-            "key_ingredients": list(s.get("key_ingredients", [])),
-            "cuisine": str(s.get("cuisine", "")),
+            time_digits = re.search(r"\d+", raw_time)
+            raw_time = int(time_digits.group()) if time_digits else context.available_time_minutes
+        parsed_suggestions.append({
+            "name": str(raw_suggestion["name"]),
+            "key_ingredients": list(raw_suggestion.get("key_ingredients", [])),
+            "cuisine": str(raw_suggestion.get("cuisine", "")),
             "estimated_time": int(raw_time),
         })
 
-    # Log every suggestion so the pipeline is fully traceable in the console
-    logger.info("LLM ideation produced %d suggestions:", len(result))
-    for i, r in enumerate(result, 1):
+    # Log every suggestion for full pipeline traceability in the server log.
+    logger.info("LLM ideation produced %d suggestions:", len(parsed_suggestions))
+    for rank, suggestion in enumerate(parsed_suggestions, 1):
         logger.info(
             "  %2d. %-45s | %-18s | %3d min | ingredients: %s",
-            i,
-            r["name"],
-            r["cuisine"],
-            r["estimated_time"],
-            ", ".join(r["key_ingredients"]),
+            rank,
+            suggestion["name"],
+            suggestion["cuisine"],
+            suggestion["estimated_time"],
+            ", ".join(suggestion["key_ingredients"]),
         )
-    return result
+    return parsed_suggestions
 
 
 _FALLBACK_RECIPE_NAMES = [
@@ -567,12 +656,20 @@ async def suggest_substitutions(
     recipe_ingredients: list[str],
     user_ingredients: list[str],
 ) -> list[dict]:
-    """
-    Ask the LLM to match recipe ingredients against the user's pantry and
-    suggest substitutions for missing items.
+    """Ask the LLM to match recipe ingredients against the user's pantry.
 
-    Returns a list of dicts: [{ingredient, have, substitution}, ...]
-    Falls back to empty list if LLM is unavailable.
+    For each recipe ingredient, determines whether the user has it (or a
+    close equivalent) and, if not, suggests a practical substitution from
+    the user's available ingredients or a generic alternative.
+
+    Args:
+        recipe_ingredients: Full ingredient list from the scraped recipe.
+        user_ingredients: Ingredients the user has available.
+
+    Returns:
+        List of dicts, each with keys ``ingredient`` (str), ``have`` (bool),
+        and ``substitution`` (str or None). Returns an empty list if the LLM
+        is unavailable or the recipe has no ingredients.
     """
     if not LLM_BASE_URL or not recipe_ingredients:
         return []
@@ -585,7 +682,7 @@ async def suggest_substitutions(
     logger.info("[LLM substitution] FULL PROMPT SENT TO %s:\n%s", LLM_MODEL, prompt)
 
     try:
-        raw = await ollama_chat(
+        raw_response_text = await ollama_chat(
             base_url=LLM_BASE_URL,
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -594,8 +691,8 @@ async def suggest_substitutions(
             timeout=float(LLM_TIMEOUT_SECONDS),
             think=False,
         )
-        cleaned = _extract_json(raw)
-        results = json.loads(cleaned)
+        cleaned_json = _extract_json(raw_response_text)
+        results = json.loads(cleaned_json)
         if isinstance(results, list):
             logger.info("LLM substitution: %d ingredients analysed", len(results))
             return results

@@ -13,6 +13,10 @@ export default function useSavedRecipes() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  /**
+   * Fetches the saved recipe list from the backend and updates local state.
+   * No-ops for unauthenticated or local-only users.
+   */
   const loadSaved = useCallback(async () => {
     if (!user?.id || user?.localOnly) return;
     let cancelled = false;
@@ -36,6 +40,11 @@ export default function useSavedRecipes() {
     loadSaved();
   }, [loadSaved]);
 
+  /**
+   * Saves a recipe and fires a `recipe_saved` behavior event.
+   * @param {string} recipeId - ID of the recipe to save.
+   * @param {string} sessionId - Active session pool id for event attribution.
+   */
   const save = useCallback(async (recipeId, sessionId) => {
     if (!user?.id) return;
     try {
@@ -52,10 +61,14 @@ export default function useSavedRecipes() {
     }
   }, [user?.id]);
 
+  /**
+   * Removes a saved recipe entry from the backend and local state.
+   * @param {string} savedEntryId - ID of the SavedRecipe entry (not the recipe id).
+   */
   const remove = useCallback(async (savedEntryId) => {
     try {
       await unsaveRecipe(savedEntryId);
-      setSavedRecipes((prev) => prev.filter((s) => s.id !== savedEntryId));
+      setSavedRecipes((prev) => prev.filter((entry) => entry.id !== savedEntryId));
     } catch (err) {
       setError(err.message || 'Failed to remove saved recipe');
     }
@@ -63,10 +76,15 @@ export default function useSavedRecipes() {
 
   // O(1) Set lookup — avoids scanning the full array on every card render
   const savedIdSet = useMemo(
-    () => new Set(savedRecipes.map((s) => s.recipeId)),
+    () => new Set(savedRecipes.map((entry) => entry.recipeId)),
     [savedRecipes],
   );
 
+  /**
+   * Returns true if the given recipe id is in the saved set.
+   * @param {string} recipeId
+   * @returns {boolean}
+   */
   const isSaved = useCallback((recipeId) => savedIdSet.has(recipeId), [savedIdSet]);
 
   return { savedRecipes, loading, error, save, remove, isSaved, reload: loadSaved };

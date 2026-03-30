@@ -19,6 +19,16 @@ const VARIANTS = {
   },
 };
 
+/**
+ * Themed button with primary, secondary, and outline variants.
+ * @param {object} props
+ * @param {string} props.title - Button label text.
+ * @param {function} props.onPress - Tap handler.
+ * @param {'primary'|'secondary'|'outline'} [props.variant='primary'] - Visual style.
+ * @param {boolean} [props.disabled=false] - Prevents interaction when true.
+ * @param {boolean} [props.loading=false] - Shows ActivityIndicator instead of label.
+ * @param {string} [props.className] - Additional NativeWind class names.
+ */
 export default function Button({
   title,
   onPress,

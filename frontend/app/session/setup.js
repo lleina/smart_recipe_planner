@@ -38,6 +38,7 @@ export default function SessionSetupScreen() {
   const scrollRef = useRef(null);
   const manualInputRef = useRef(null);
 
+  /** Adds the current manual ingredient text input as a confirmed ingredient. */
   const handleAddManual = () => {
     const name = manualIngredient.trim();
     if (!name) return;
@@ -53,6 +54,7 @@ export default function SessionSetupScreen() {
     setManualIngredient('');
   };
 
+  /** Opens the camera and auto-identifies ingredients from the captured photo. */
   const handleCameraPress = async () => {
     await vlm.pickFromCamera();
     if (vlm.images.length > 0) {
@@ -60,6 +62,7 @@ export default function SessionSetupScreen() {
     }
   };
 
+  /** Opens the photo library; auto-identifies if new images are added and no ingredients exist yet. */
   const handleUploadPress = async () => {
     const prevCount = vlm.images.length;
     await vlm.pickFromLibrary();
@@ -69,10 +72,12 @@ export default function SessionSetupScreen() {
     }
   };
 
+  /** Manually triggers VLM identification on the currently selected images. */
   const handleIdentify = async () => {
     await vlm.identifyFromImages();
   };
 
+  /** Validates that ingredients exist, then navigates to the generating screen. */
   const handleStartDiscovery = () => {
     const confirmedIngredients = vlm.getConfirmedIngredients();
     if (confirmedIngredients.length === 0) {

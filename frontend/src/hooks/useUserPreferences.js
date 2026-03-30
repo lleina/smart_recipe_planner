@@ -32,6 +32,10 @@ export default function useUserPreferences() {
     if (user?.id) loadPreferences();
   }, [user?.id]);
 
+  /**
+   * Loads user preferences from local cache first, then syncs from the backend.
+   * Sets loading/error state accordingly.
+   */
   const loadPreferences = async () => {
     setLoading(true);
     setError(null);
@@ -49,6 +53,10 @@ export default function useUserPreferences() {
     }
   };
 
+  /**
+   * Merges `updated` fields into current preferences and persists to cache and backend.
+   * @param {Partial<object>} updated - Fields to update.
+   */
   const savePreferences = useCallback(async (updated) => {
     setError(null);
     try {

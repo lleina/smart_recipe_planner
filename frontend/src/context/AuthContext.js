@@ -1,163 +1,238 @@
 /**
- * Auth state provider.
- * Manages authentication state, token storage, and login/logout flow.
+ * Authentication state provider for the Smart Recipe Planner.
  *
- * Supports offline-first onboarding:
- *   - localSetup() creates a local-only user (no server call)
- *   - ensureRegistered() lazily registers with backend when server is needed
+ * Manages the full auth lifecycle — local-only onboarding, lazy backend
+ * registration, JWT token storage, transparent token refresh, and logout.
+ *
+ * Offline-first design:
+ *   1. localSetup() — creates a local-only user identity (no server call).
+ *      Used during onboarding so users can complete setup without a network
+ *      connection.
+ *   2. ensureRegistered() — lazily creates a real backend account the first
+ *      time server state is required (e.g. on the first recipe fetch).
+ *      Subsequent calls are no-ops if the user is already registered.
+ *
+ * Token lifecycle:
+ *   - Access tokens (JWT, ~1-day TTL) are stored in expo-secure-store.
+ *   - Refresh tokens (~30-day TTL) are used for transparent renewal via the
+ *     refreshToken callback registered with the API client.
  */
 
-import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as SecureStore from 'expo-secure-store';
-import { setAccessToken, setRefreshTokenHandler, abortAllPendingRequests } from '../services/api';
+
+import { abortAllPendingRequests, setAccessToken, setRefreshTokenHandler } from '../services/api';
 import { register } from '../services/authService';
+import { API_BASE_URL } from '../constants/config';
 
 const AuthContext = createContext(null);
 
-const ACCESS_TOKEN_KEY = 'access_token';
-const REFRESH_TOKEN_KEY = 'refresh_token';
-const USER_ID_KEY = 'user_id';
-const LOCAL_ONLY_KEY = 'local_only';
+const SECURE_STORE_KEYS = {
+  ACCESS_TOKEN: 'access_token',
+  REFRESH_TOKEN: 'refresh_token',
+  USER_ID: 'user_id',
+  LOCAL_ONLY: 'local_only',
+  ONBOARDED: 'onboarded',
+};
 
+/**
+ * Provides authentication state and actions to the component tree.
+ *
+ * @param {{ children: React.ReactNode }} props
+ */
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isOnboarded, setIsOnboarded] = useState(false);
 
-  useEffect(() => {
-    loadStoredAuth();
-  }, []);
+  // Used to deduplicate concurrent ensureRegistered() calls.
+  const pendingRegistrationRef = useRef(null);
 
-  const loadStoredAuth = async () => {
+  // ── Initialization ────────────────────────────────────────────────────────
+
+  /**
+   * Restore auth state from secure storage on cold start.
+   * Handles both fully-registered users (JWT tokens) and local-only users.
+   */
+  const loadStoredAuthState = useCallback(async () => {
     try {
-      const [token, userId, onboarded, localOnly] = await Promise.all([
-        SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
-        SecureStore.getItemAsync(USER_ID_KEY),
-        SecureStore.getItemAsync('onboarded'),
-        SecureStore.getItemAsync(LOCAL_ONLY_KEY),
+      const [accessToken, storedUserId, onboardedFlag, localOnlyFlag] = await Promise.all([
+        SecureStore.getItemAsync(SECURE_STORE_KEYS.ACCESS_TOKEN),
+        SecureStore.getItemAsync(SECURE_STORE_KEYS.USER_ID),
+        SecureStore.getItemAsync(SECURE_STORE_KEYS.ONBOARDED),
+        SecureStore.getItemAsync(SECURE_STORE_KEYS.LOCAL_ONLY),
       ]);
 
-      if (token && userId) {
-        // Fully registered user with JWT
-        setAccessToken(token);
-        setUser({ id: userId });
-        setIsOnboarded(onboarded === 'true');
-      } else if (localOnly === 'true' && userId) {
-        // Local-only user (not yet registered with backend)
-        setUser({ id: userId, localOnly: true });
-        setIsOnboarded(onboarded === 'true');
+      if (accessToken && storedUserId) {
+        // Fully registered user — restore JWT and user identity.
+        setAccessToken(accessToken);
+        setUser({ id: storedUserId });
+        setIsOnboarded(onboardedFlag === 'true');
+      } else if (localOnlyFlag === 'true' && storedUserId) {
+        // Local-only user — no JWT yet; pending backend registration.
+        setUser({ id: storedUserId, localOnly: true });
+        setIsOnboarded(onboardedFlag === 'true');
       }
     } catch {
-      // Token retrieval failed - user will need to log in
+      // Secure store read failed (e.g. keychain unavailable) — user must log in.
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadStoredAuthState();
+  }, [loadStoredAuthState]);
+
+  // ── Auth actions ──────────────────────────────────────────────────────────
 
   /**
-   * Creates a local-only user identity. No server call required.
-   * Used during offline-first onboarding.
+   * Create a local-only user identity without contacting the backend.
+   *
+   * The local ID is a timestamp + random suffix; it is replaced with the
+   * real backend user ID when ensureRegistered() is called.
    */
   const localSetup = useCallback(async () => {
-    const localId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const localUserId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     await Promise.all([
-      SecureStore.setItemAsync(USER_ID_KEY, localId),
-      SecureStore.setItemAsync(LOCAL_ONLY_KEY, 'true'),
+      SecureStore.setItemAsync(SECURE_STORE_KEYS.USER_ID, localUserId),
+      SecureStore.setItemAsync(SECURE_STORE_KEYS.LOCAL_ONLY, 'true'),
     ]);
-    setUser({ id: localId, localOnly: true });
+    setUser({ id: localUserId, localOnly: true });
   }, []);
 
   /**
-   * Full login with real JWT tokens from the backend.
+   * Store JWT tokens from the backend and set the user as fully authenticated.
+   *
+   * @param {string} accessToken - Short-lived JWT access token.
+   * @param {string} refreshTokenValue - Long-lived refresh token.
+   * @param {string} userId - Backend user ID (UUID).
    */
-  const login = useCallback(async (accessToken, refreshToken, userId) => {
+  const login = useCallback(async (accessToken, refreshTokenValue, userId) => {
     await Promise.all([
-      SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken),
-      SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshToken),
-      SecureStore.setItemAsync(USER_ID_KEY, userId),
-      SecureStore.deleteItemAsync(LOCAL_ONLY_KEY),
+      SecureStore.setItemAsync(SECURE_STORE_KEYS.ACCESS_TOKEN, accessToken),
+      SecureStore.setItemAsync(SECURE_STORE_KEYS.REFRESH_TOKEN, refreshTokenValue),
+      SecureStore.setItemAsync(SECURE_STORE_KEYS.USER_ID, userId),
+      SecureStore.deleteItemAsync(SECURE_STORE_KEYS.LOCAL_ONLY),
     ]);
     setAccessToken(accessToken);
     setUser({ id: userId });
   }, []);
 
   /**
-   * Lazily registers with backend when server access is first needed.
-   * If already registered, returns immediately. Throws on network failure.
+   * Lazily register the local-only user with the backend.
+   *
+   * Safe to call multiple times concurrently — deduplicates in-flight requests
+   * so only one registration call is made even if called simultaneously.
+   * Returns immediately if the user is already fully registered.
+   *
+   * @throws {Error} If the backend registration request fails.
    */
-  const registeringRef = useRef(null);
   const ensureRegistered = useCallback(async () => {
-    // Already have a real JWT
-    const token = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
-    if (token) return;
+    const storedToken = await SecureStore.getItemAsync(SECURE_STORE_KEYS.ACCESS_TOKEN);
+    if (storedToken) return; // Already registered — nothing to do.
 
-    // Deduplicate concurrent calls
-    if (registeringRef.current) return registeringRef.current;
+    if (pendingRegistrationRef.current) {
+      return pendingRegistrationRef.current; // Deduplicate concurrent calls.
+    }
 
-    registeringRef.current = (async () => {
+    pendingRegistrationRef.current = (async () => {
       try {
-        const email = `guest_${Date.now()}@app.local`;
-        const password = `guest_${Date.now()}`;
-        const data = await register(email, password);
-        await login(data.accessToken, data.refreshToken, data.userId);
+        const guestEmail = `guest_${Date.now()}@app.local`;
+        const guestPassword = `guest_${Date.now()}`;
+        const registrationData = await register(guestEmail, guestPassword);
+        await login(
+          registrationData.accessToken,
+          registrationData.refreshToken,
+          registrationData.userId,
+        );
       } finally {
-        registeringRef.current = null;
+        pendingRegistrationRef.current = null;
       }
     })();
 
-    return registeringRef.current;
+    return pendingRegistrationRef.current;
   }, [login]);
 
+  /**
+   * Clear all stored auth state and cancel any in-flight API requests.
+   *
+   * Cancels pending requests immediately to prevent stale API calls from
+   * completing after the session is cleared.
+   */
   const logout = useCallback(async () => {
-    // Cancel every in-flight API request immediately so no stale calls
-    // complete after the user's session is cleared.
     abortAllPendingRequests();
     await Promise.all([
-      SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY),
-      SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY),
-      SecureStore.deleteItemAsync(USER_ID_KEY),
-      SecureStore.deleteItemAsync('onboarded'),
-      SecureStore.deleteItemAsync(LOCAL_ONLY_KEY),
+      SecureStore.deleteItemAsync(SECURE_STORE_KEYS.ACCESS_TOKEN),
+      SecureStore.deleteItemAsync(SECURE_STORE_KEYS.REFRESH_TOKEN),
+      SecureStore.deleteItemAsync(SECURE_STORE_KEYS.USER_ID),
+      SecureStore.deleteItemAsync(SECURE_STORE_KEYS.ONBOARDED),
+      SecureStore.deleteItemAsync(SECURE_STORE_KEYS.LOCAL_ONLY),
     ]);
     setAccessToken(null);
     setUser(null);
     setIsOnboarded(false);
   }, []);
 
+  /**
+   * Mark the onboarding flow as complete and persist the flag to secure storage.
+   */
   const completeOnboarding = useCallback(async () => {
-    await SecureStore.setItemAsync('onboarded', 'true');
+    await SecureStore.setItemAsync(SECURE_STORE_KEYS.ONBOARDED, 'true');
     setIsOnboarded(true);
   }, []);
 
-  const refreshToken = useCallback(async () => {
+  /**
+   * Silently refresh the access token using the stored refresh token.
+   *
+   * Called automatically by the API client on any 401 response. If the
+   * refresh token is missing or the refresh request fails, logs the user out.
+   *
+   * @returns {Promise<string|null>} The new access token, or null on failure.
+   */
+  const refreshAccessToken = useCallback(async () => {
     try {
-      const stored = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
-      if (!stored) return null;
-      const response = await fetch(`${require('../constants/config').API_BASE_URL}/auth/refresh`, {
+      const storedRefreshToken = await SecureStore.getItemAsync(SECURE_STORE_KEYS.REFRESH_TOKEN);
+      if (!storedRefreshToken) return null;
+
+      const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: stored }),
+        body: JSON.stringify({ refresh_token: storedRefreshToken }),
       });
+
       if (!response.ok) {
         await logout();
         return null;
       }
-      const data = await response.json();
-      const newToken = data.access_token;
-      await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, newToken);
-      setAccessToken(newToken);
-      return newToken;
+
+      const responseData = await response.json();
+      const newAccessToken = responseData.access_token;
+      await SecureStore.setItemAsync(SECURE_STORE_KEYS.ACCESS_TOKEN, newAccessToken);
+      setAccessToken(newAccessToken);
+      return newAccessToken;
     } catch {
       await logout();
       return null;
     }
   }, [logout]);
 
+  // Register the refresh callback with the API client whenever it changes.
   useEffect(() => {
-    setRefreshTokenHandler(refreshToken);
-  }, [refreshToken]);
+    setRefreshTokenHandler(refreshAccessToken);
+  }, [refreshAccessToken]);
 
-  const value = useMemo(() => ({
+  // ── Context value ─────────────────────────────────────────────────────────
+
+  const contextValue = useMemo(() => ({
     user,
     isLoading,
     isOnboarded,
@@ -167,19 +242,34 @@ export function AuthProvider({ children }) {
     logout,
     completeOnboarding,
     ensureRegistered,
-  }), [user, isLoading, isOnboarded, localSetup, login, logout, completeOnboarding, ensureRegistered]);
+  }), [
+    user,
+    isLoading,
+    isOnboarded,
+    localSetup,
+    login,
+    logout,
+    completeOnboarding,
+    ensureRegistered,
+  ]);
 
   return (
-    <AuthContext.Provider value={value}>
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );
 }
 
+/**
+ * Hook to consume AuthContext.
+ *
+ * @returns {object} Auth state and actions from the nearest AuthProvider.
+ * @throws {Error} If called outside an AuthProvider.
+ */
 export const useAuth = () => {
   const context = useContext(AuthContext);
   if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
+    throw new Error('useAuth must be used inside an AuthProvider');
   }
   return context;
 };

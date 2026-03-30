@@ -94,8 +94,18 @@ Scan the QR code with Expo Go (Android) or Camera app (iOS).
 
 ### Running Tests
 
+**Frontend** (no backend needed):
 ```bash
-cd frontend && npm test
+cd ~/recipe_generator/frontend && npm test
+```
+
+**Backend** (requires backend + Ollama running via `./start_all.sh`):
+```bash
+cd ~/recipe_generator/backend
+source venv/bin/activate
+pytest tests/ -v                        # all tests (~10 min)
+pytest tests/ -v -m "not slow"          # skip LLM pipeline tests
+pytest tests/test_infinite_scroll.py    # infinite scroll only
 ```
 
 ## Project Structure

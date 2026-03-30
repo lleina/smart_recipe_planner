@@ -23,6 +23,7 @@ export default function useVlm({ ensureRegistered } = {}) {
     setVlmAuthTokenGetter(getAccessToken);
   }, []);
 
+  /** Requests camera permission, captures a photo, compresses it, and appends to images list. */
   const pickFromCamera = useCallback(async () => {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (!permission.granted) {
@@ -50,6 +51,7 @@ export default function useVlm({ ensureRegistered } = {}) {
     }
   }, []);
 
+  /** Requests photo library permission and appends valid, compressed selected images. */
   const pickFromLibrary = useCallback(async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
@@ -85,6 +87,10 @@ export default function useVlm({ ensureRegistered } = {}) {
     }
   }, []);
 
+  /**
+   * Sends the current images to the VLM backend for ingredient identification.
+   * Results are filtered by confidence, deduplicated, and sorted by urgency.
+   */
   const identifyFromImages = useCallback(async () => {
     if (images.length === 0) return;
     setLoading(true);
@@ -107,28 +113,49 @@ export default function useVlm({ ensureRegistered } = {}) {
     }
   }, [images]);
 
+  /**
+   * Marks a specific ingredient as confirmed by name.
+   * @param {string} name - Ingredient name to confirm.
+   */
   const confirmIngredient = useCallback((name) => {
     setIngredients((prev) =>
-      prev.map((i) => (i.name === name ? { ...i, confirmed: true } : i)),
+      prev.map((ingredient) => (ingredient.name === name ? { ...ingredient, confirmed: true } : ingredient)),
     );
   }, []);
 
+  /**
+   * Removes an ingredient from the list by name.
+   * @param {string} name - Ingredient name to remove.
+   */
   const removeIngredient = useCallback((name) => {
-    setIngredients((prev) => prev.filter((i) => i.name !== name));
+    setIngredients((prev) => prev.filter((ingredient) => ingredient.name !== name));
   }, []);
 
+  /**
+   * Appends a manually-created ingredient to the list.
+   * @param {object} ingredient - Ingredient object matching the VLM response schema.
+   */
   const addIngredient = useCallback((ingredient) => {
     setIngredients((prev) => [...prev, ingredient]);
   }, []);
 
+  /**
+   * Returns only the ingredients the user has confirmed.
+   * @returns {object[]} Filtered ingredient list.
+   */
   const getConfirmedIngredients = useCallback(() => {
-    return ingredients.filter((i) => i.confirmed);
+    return ingredients.filter((ingredient) => ingredient.confirmed);
   }, [ingredients]);
 
+  /**
+   * Removes an image from the list by its index.
+   * @param {number} index - Zero-based position in the images array.
+   */
   const removeImage = useCallback((index) => {
-    setImages((prev) => prev.filter((_, i) => i !== index));
+    setImages((prev) => prev.filter((_, imageIndex) => imageIndex !== index));
   }, []);
 
+  /** Clears all images, ingredients, and error state. */
   const reset = useCallback(() => {
     setImages([]);
     setIngredients([]);

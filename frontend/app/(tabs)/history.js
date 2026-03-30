@@ -94,6 +94,13 @@ export default function HistoryScreen() {
   );
 }
 
+/**
+ * Single row in the cooking history list.
+ * @param {object} props
+ * @param {object} props.item - CookHistory entry from the backend.
+ * @param {function} props.onPress - Navigate to recipe detail.
+ * @param {function} props.onDelete - Delete this history entry.
+ */
 function HistoryRow({ item, onPress, onDelete }) {
   const mealLabel = MEAL_LABELS[item.mealType] || item.mealType || '';
   const dateStr = item.cookedAt ? new Date(item.cookedAt).toLocaleDateString(undefined, {

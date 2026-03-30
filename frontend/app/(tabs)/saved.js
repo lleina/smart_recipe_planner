@@ -84,6 +84,13 @@ export default function SavedScreen() {
   );
 }
 
+/**
+ * Single row in the saved recipes list.
+ * @param {object} props
+ * @param {object} props.item - SavedRecipe entry from the backend.
+ * @param {function} props.onPress - Navigate to recipe detail.
+ * @param {function} props.onRemove - Remove this entry from saved.
+ */
 function SavedRecipeRow({ item, onPress, onRemove }) {
   return (
     <Pressable

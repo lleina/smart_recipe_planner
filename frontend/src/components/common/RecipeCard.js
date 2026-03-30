@@ -78,9 +78,14 @@ function IngredientMatchBadge({ recipe }) {
   );
 }
 
-function capitalize(s) {
-  if (!s) return s;
-  return s.charAt(0).toUpperCase() + s.slice(1);
+/**
+ * Capitalises the first character of a string.
+ * @param {string} str - Input string.
+ * @returns {string} String with first letter uppercased.
+ */
+function capitalize(str) {
+  if (!str) return str;
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 /**
@@ -209,6 +214,7 @@ function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }
 
 const MemoRecipeCardSkeleton = memo(RecipeCardSkeleton);
 
+/** Placeholder skeleton shown while a recipe card is loading. */
 function RecipeCardSkeleton() {
   return (
     <View className="bg-surface rounded-2xl overflow-hidden mb-4">
