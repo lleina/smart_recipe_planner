@@ -47,32 +47,43 @@
     "tailwindcss": "^3.4.0"
   },
   "jest": {
-    "testEnvironment": "node",
-    "transform": {
-      "^.+\\.[jt]sx?$": [
-        "babel-jest",
-        {
-          "configFile": false,
-          "presets": [
-            [
-              "@babel/preset-env",
-              {
-                "targets": {
-                  "node": "current"
-                }
-              }
-            ]
+    "projects": [
+      {
+        "displayName": "unit",
+        "testEnvironment": "node",
+        "testMatch": [
+          "<rootDir>/__tests__/utils/**/*.test.js",
+          "<rootDir>/__tests__/services/**/*.test.js"
+        ],
+        "transform": {
+          "^.+\\.[jt]sx?$": [
+            "babel-jest",
+            {
+              "configFile": false,
+              "presets": [
+                ["@babel/preset-env", { "targets": { "node": "current" } }]
+              ]
+            }
           ]
-        }
-      ]
-    },
-    "transformIgnorePatterns": [
-      "node_modules/"
-    ],
-    "moduleFileExtensions": [
-      "js",
-      "jsx",
-      "json"
+        },
+        "transformIgnorePatterns": ["node_modules/"],
+        "moduleFileExtensions": ["js", "jsx", "json"]
+      },
+      {
+        "displayName": "hooks",
+        "preset": "jest-expo",
+        "testMatch": [
+          "<rootDir>/__tests__/context/**/*.test.js",
+          "<rootDir>/__tests__/hooks/**/*.test.js"
+        ],
+        "transformIgnorePatterns": [
+          "node_modules/(?!((jest-)?react-native|@react-native(-community)?)|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|react-navigation|@react-navigation/.*|@unimodules/.*|unimodules|sentry-expo|native-base|react-native-svg|nativewind|react-native-css-interop)"
+        ],
+        "moduleNameMapper": {
+          "^@/(.*)$": "<rootDir>/src/$1"
+        },
+        "setupFilesAfterEnv": ["@testing-library/jest-native/extend-expect"]
+      }
     ]
   },
   "private": true
