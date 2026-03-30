@@ -291,11 +291,37 @@ except:
 
 ### 5.6 Linting and formatting
 
-All Python files must pass:
-- **Ruff** (linting + import sort): `ruff check .`
-- **Black** (formatting): `black --check .`
+All Python files must pass all three tools before merge:
 
-Configuration lives in `pyproject.toml` at the backend root.
+| Tool | Purpose | Command |
+|------|---------|---------|
+| **Pylint** | Semantic analysis, unused variables, complexity, naming | `pylint app/` |
+| **Ruff** | Fast linting + import sort (replaces flake8 / isort) | `ruff check .` |
+| **Black** | Opinionated auto-formatter (line length 88) | `black --check .` |
+
+Run order matters: fix **Black** first (formatting), then **Ruff** (import
+order, style), then **Pylint** (semantic issues). A pre-commit hook runs all
+three automatically.
+
+**Pylint score requirement**: every module must score **≥ 9.0 / 10.0**. Scores
+below this threshold will fail CI. To check a single file:
+
+```bash
+pylint app/services/ranking_service.py --fail-under=9.0
+```
+
+**Acceptable Pylint suppressions** (with justification comment required):
+
+```python
+# pylint: disable=too-many-arguments  # Pipeline orchestrator legitimately needs
+                                       # all context fields; splitting would hide coupling.
+```
+
+Never suppress `invalid-name`, `missing-docstring`, or `broad-except` without
+a very strong justification — these categories catch the most real bugs.
+
+Configuration lives in `pyproject.toml` (Black/Ruff) and `.pylintrc` at the
+backend root.
 
 ---
 
