@@ -29,12 +29,24 @@ import {
 // Helpers
 // --------------------------------------------------------------------------
 
+/**
+ * Summarises a list of string labels for display in a preference row.
+ * @param {string[]} items - Labels to summarise.
+ * @param {number} [max=3] - Max items to show before "+N more".
+ * @returns {string} Human-readable summary.
+ */
 function summariseList(items, max = 3) {
   if (!items || items.length === 0) return 'None';
   const shown = items.slice(0, max).join(', ');
   return items.length > max ? `${shown} +${items.length - max} more` : shown;
 }
 
+/**
+ * Looks up the display label for an option id.
+ * @param {string|null} id - Option id.
+ * @param {Array<{id: string, label: string}>} options - Options array.
+ * @returns {string} Label or the id itself if not found.
+ */
 function labelFor(id, options) {
   const found = options.find((o) => o.id === id);
   return found ? found.label : id;
@@ -44,6 +56,15 @@ function labelFor(id, options) {
 // Reusable preference row
 // --------------------------------------------------------------------------
 
+/**
+ * Tappable preference row linking to its edit modal.
+ * @param {object} props
+ * @param {string} props.icon - Ionicons icon name.
+ * @param {string} props.label - Row label.
+ * @param {string} [props.summary] - Current value summary shown below the label.
+ * @param {function} props.onPress - Opens the corresponding edit modal.
+ * @param {boolean} [props.danger] - When true, renders in danger/red styling.
+ */
 function PrefRow({ icon, label, summary, onPress, danger }) {
   return (
     <Pressable
@@ -67,6 +88,18 @@ function PrefRow({ icon, label, summary, onPress, danger }) {
 // Generic multi-select modal
 // --------------------------------------------------------------------------
 
+/**
+ * Bottom-sheet modal for selecting multiple options from a list.
+ * @param {object} props
+ * @param {boolean} props.visible - Controls modal visibility.
+ * @param {string} props.title - Modal header title.
+ * @param {Array<{id: string, label: string}>} props.options - Selectable options.
+ * @param {string[]} props.selected - Currently selected option ids.
+ * @param {function} props.onToggle - Called with option id when toggled.
+ * @param {function} props.onConfirm - Called to commit the selection.
+ * @param {function} props.onCancel - Called to dismiss without saving.
+ * @param {boolean} [props.searchable] - Show a search field above the list.
+ */
 function MultiSelectModal({ visible, title, options, selected, onToggle, onConfirm, onCancel, searchable }) {
   const [query, setQuery] = useState('');
   const filtered = searchable && query
@@ -132,6 +165,19 @@ function MultiSelectModal({ visible, title, options, selected, onToggle, onConfi
 // Generic single-select modal
 // --------------------------------------------------------------------------
 
+/**
+ * Bottom-sheet modal for selecting a single option from a list.
+ * @param {object} props
+ * @param {boolean} props.visible - Controls modal visibility.
+ * @param {string} props.title - Modal header title.
+ * @param {Array<{id: string, label: string}>} props.options - Selectable options.
+ * @param {string|null} props.selected - Currently selected option id.
+ * @param {function} props.onSelect - Called with option id on selection.
+ * @param {function} props.onConfirm - Called to commit the selection.
+ * @param {function} props.onCancel - Called to dismiss without saving.
+ * @param {boolean} [props.nullable] - Whether "None" is a valid choice.
+ * @param {string} [props.nullLabel] - Label text for the null/none option.
+ */
 function SingleSelectModal({ visible, title, options, selected, onSelect, onConfirm, onCancel, nullable, nullLabel }) {
   const allOptions = nullable ? [{ id: null, label: nullLabel || 'None' }, ...options] : options;
   return (

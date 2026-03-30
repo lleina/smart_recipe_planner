@@ -4,6 +4,14 @@
 
 import { Pressable, Text } from 'react-native';
 
+/**
+ * Selectable chip / tag for multi-select option lists.
+ * @param {object} props
+ * @param {string} props.label - Display text.
+ * @param {boolean} props.selected - Highlighted when true.
+ * @param {function} props.onPress - Toggle handler.
+ * @param {'default'|'urgent'} [props.variant='default'] - 'urgent' applies red border styling.
+ */
 export default function Tag({ label, selected, onPress, variant = 'default' }) {
   const baseStyle = 'px-4 py-2 rounded-full border mr-2 mb-2';
   const selectedStyle = 'bg-primary border-primary';

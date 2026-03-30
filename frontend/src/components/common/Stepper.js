@@ -4,11 +4,22 @@
 
 import { View, Text, Pressable } from 'react-native';
 
+/**
+ * Numeric stepper control — increment / decrement within a clamped range.
+ * @param {object} props
+ * @param {number} props.value - Current value.
+ * @param {function} props.onValueChange - Called with new value when + or − is pressed.
+ * @param {number} [props.min=1] - Minimum allowed value.
+ * @param {number} [props.max=12] - Maximum allowed value.
+ * @param {string} [props.label] - Optional label rendered to the left of the controls.
+ */
 export default function Stepper({ value, onValueChange, min = 1, max = 12, label }) {
+  /** Decrements the value by one if above the minimum. */
   const decrement = () => {
     if (value > min) onValueChange(value - 1);
   };
 
+  /** Increments the value by one if below the maximum. */
   const increment = () => {
     if (value < max) onValueChange(value + 1);
   };

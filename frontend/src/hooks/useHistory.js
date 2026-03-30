@@ -13,6 +13,10 @@ export default function useHistory() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  /**
+   * Fetches cook history entries from the backend and updates local state.
+   * No-ops when no user is authenticated.
+   */
   const loadHistory = useCallback(async () => {
     if (!user?.id) return;
     let cancelled = false;
@@ -36,6 +40,13 @@ export default function useHistory() {
     loadHistory();
   }, [loadHistory]);
 
+  /**
+   * Records a recipe as cooked and fires a `recipe_cooked` behavior event.
+   * @param {string} recipeId - Recipe that was cooked.
+   * @param {string} mealType - Meal occasion (e.g., 'dinner').
+   * @param {number} servingCount - Number of servings made.
+   * @param {string} sessionId - Active session pool id for event attribution.
+   */
   const addEntry = useCallback(async (recipeId, mealType, servingCount, sessionId) => {
     if (!user?.id) return;
     try {
@@ -59,10 +70,14 @@ export default function useHistory() {
     }
   }, [user?.id]);
 
+  /**
+   * Deletes a cook history entry from the backend and removes it from local state.
+   * @param {string} entryId - ID of the CookHistory entry to delete.
+   */
   const removeEntry = useCallback(async (entryId) => {
     try {
       await deleteHistoryEntry(entryId);
-      setHistory((prev) => prev.filter((h) => h.id !== entryId));
+      setHistory((prev) => prev.filter((entry) => entry.id !== entryId));
     } catch (err) {
       setError(err.message || 'Failed to delete history entry');
     }

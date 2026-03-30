@@ -70,20 +70,20 @@ export const createManualIngredient = (name) => ({
  */
 export const deduplicateIngredients = (ingredients) => {
   if (!Array.isArray(ingredients)) return [];
-  const seen = {};
-  const quantities = {};
-  for (const item of ingredients) {
-    const key = (item.name || '').toLowerCase().trim();
-    if (!seen[key] || item.confidence > seen[key].confidence) {
-      seen[key] = item;
+  const bestByName = {};
+  const quantitiesByName = {};
+  for (const ingredient of ingredients) {
+    const key = (ingredient.name || '').toLowerCase().trim();
+    if (!bestByName[key] || ingredient.confidence > bestByName[key].confidence) {
+      bestByName[key] = ingredient;
     }
-    if (!quantities[key]) quantities[key] = [];
-    quantities[key].push(item.estimatedQuantity ?? 1);
+    if (!quantitiesByName[key]) quantitiesByName[key] = [];
+    quantitiesByName[key].push(ingredient.estimatedQuantity ?? 1);
   }
-  return Object.keys(seen).map((key) => {
-    const qty = quantities[key];
-    const avg = qty.reduce((a, b) => a + b, 0) / qty.length;
-    return { ...seen[key], estimatedQuantity: Math.round(avg * 100) / 100 };
+  return Object.keys(bestByName).map((key) => {
+    const quantities = quantitiesByName[key];
+    const averageQuantity = quantities.reduce((sum, qty) => sum + qty, 0) / quantities.length;
+    return { ...bestByName[key], estimatedQuantity: Math.round(averageQuantity * 100) / 100 };
   });
 };
 
@@ -94,9 +94,9 @@ export const deduplicateIngredients = (ingredients) => {
  */
 export const sortByUrgency = (ingredients) => {
   if (!Array.isArray(ingredients)) return [];
-  return [...ingredients].sort((a, b) => {
-    const urgA = a.urgency ?? Infinity;
-    const urgB = b.urgency ?? Infinity;
-    return urgA - urgB;
+  return [...ingredients].sort((ingredientA, ingredientB) => {
+    const urgencyA = ingredientA.urgency ?? Infinity;
+    const urgencyB = ingredientB.urgency ?? Infinity;
+    return urgencyA - urgencyB;
   });
 };

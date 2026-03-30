@@ -17,6 +17,10 @@ export default function useRecipes() {
   const [error, setError] = useState(null);
   const [poolInfo, setPoolInfo] = useState({ poolSize: 0, shownCount: 0 });
 
+  /**
+   * Starts the full recommendation pipeline for the authenticated user.
+   * @param {object} sessionContext - Meal type, servings, ingredients, and time budget.
+   */
   const startPipeline = useCallback(async (sessionContext) => {
     if (!user?.id) {
       console.error('[useRecipes] Cannot start pipeline: user not authenticated', { user });
@@ -31,7 +35,7 @@ export default function useRecipes() {
       updateSession({ sessionPoolId: result.sessionPoolId });
       setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount });
 
-      batchAddShownRecipeIds((result.recipes || []).map((r) => r.id));
+      batchAddShownRecipeIds((result.recipes || []).map((recipe) => recipe.id));
       await trackEvent({
         userId: user.id,
         sessionId: result.sessionPoolId,
@@ -46,6 +50,10 @@ export default function useRecipes() {
     }
   }, [user?.id, updateSession, batchAddShownRecipeIds]);
 
+  /**
+   * Appends the next batch of recipes from the active session pool to local state.
+   * No-ops when no session pool is active.
+   */
   const loadNextBatch = useCallback(async () => {
     if (!session.sessionPoolId) return;
     setLoading(true);
@@ -54,7 +62,7 @@ export default function useRecipes() {
       const result = await getNextBatch(session.sessionPoolId);
       setRecipes((prev) => [...prev, ...result.recipes]);
       setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount });
-      batchAddShownRecipeIds(result.recipes.map((r) => r.id));
+      batchAddShownRecipeIds(result.recipes.map((recipe) => recipe.id));
     } catch (err) {
       setError(err.message || 'Failed to load next batch');
     } finally {
@@ -62,6 +70,12 @@ export default function useRecipes() {
     }
   }, [session.sessionPoolId, batchAddShownRecipeIds]);
 
+  /**
+   * Signals a user preference to the backend to re-rank the session pool.
+   * Failures are silently swallowed — re-ranking is non-blocking per spec.
+   * @param {string} likedRecipeId - The recipe the user interacted with.
+   * @param {'saved'|'liked'} action - Type of interaction.
+   */
   const rerank = useCallback(async (likedRecipeId, action) => {
     if (!user?.id || !session.sessionPoolId) return;
     try {

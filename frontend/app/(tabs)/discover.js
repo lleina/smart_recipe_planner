@@ -76,8 +76,8 @@ export default function DiscoverScreen() {
   const handleSave = useCallback(async (recipe) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (isSaved(recipe.id)) {
-      const entry = savedRecipes.find((s) => s.recipeId === recipe.id);
-      if (entry) remove(entry.id);
+      const savedEntry = savedRecipes.find((entry) => entry.recipeId === recipe.id);
+      if (savedEntry) remove(savedEntry.id);
     } else {
       await save(recipe.id, session.sessionPoolId);
       rerank(recipe.id, 'saved').catch(() => {});
@@ -278,6 +278,11 @@ export default function DiscoverScreen() {
   );
 }
 
+/**
+ * Prompt shown when no active session exists yet.
+ * @param {object} props
+ * @param {function} props.onStart - Called when the user taps "Start Cooking Session".
+ */
 function EmptyState({ onStart }) {
   return (
     <View className="flex-1 items-center justify-center px-8">

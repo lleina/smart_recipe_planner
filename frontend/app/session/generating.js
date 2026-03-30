@@ -37,6 +37,7 @@ export default function GeneratingScreen() {
   const didStartLoading = useRef(false);
   const pollRef = useRef(null);
 
+  /** Clears the polling interval if one is active. */
   const stopPolling = () => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
@@ -98,6 +99,7 @@ export default function GeneratingScreen() {
     }
   }, [loading, recipes.length, router]);
 
+  /** Resets all pipeline state and restarts the generation flow. */
   const handleRetry = () => {
     setPipelineStatus({ step: 0, label: '', detail: '', total_steps: 4 });
     hasStarted.current = false;
@@ -107,6 +109,7 @@ export default function GeneratingScreen() {
     startPipeline(ctx);
   };
 
+  /** Returns to the session setup screen. */
   const handleGoBack = () => {
     router.back();
   };
