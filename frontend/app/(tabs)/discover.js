@@ -168,11 +168,6 @@ export default function DiscoverScreen() {
             <Text className="text-sm font-semibold text-text-primary">
               Page {currentPage + 1}
             </Text>
-            {poolInfo.poolSize > 0 ? (
-              <Text className="text-xs text-text-muted mt-0.5">
-                {poolInfo.shownCount} of {poolInfo.poolSize} recipes
-              </Text>
-            ) : null}
           </View>
 
           {/* Next button */}

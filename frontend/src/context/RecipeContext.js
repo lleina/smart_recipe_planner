@@ -365,8 +365,32 @@ export function RecipeProvider({ children }) {
       setCurrentPage(p + 1);
       currentPageRef.current = p + 1;
       setNextPagePending(false);
+    } else if (poolExhausted) {
+      // Pool is truly exhausted — nothing more to show, clear the pending state
+      setNextPagePending(false);
+    } else if (session.sessionPoolId) {
+      // Pool may still be building (re-ideation in progress) — restart prefetch
+      // after a short pause so we don't spin-hammer the backend immediately.
+      const timer = setTimeout(() => {
+        if (pendingRef.current && !prefetchingRef.current) {
+          _prefetchNextBatch(session.sessionPoolId);
+        }
+      }, 2000);
+      return () => clearTimeout(timer);
     }
-  }, [isBuffering, nextPagePending, poolInfo.poolSize]);
+  }, [isBuffering, nextPagePending, poolInfo.poolSize, session.sessionPoolId, _prefetchNextBatch]);
+
+  // ── Proactive prefetch: restart when buffer ahead drops below 20 recipes ────
+  // Triggers independently of user navigation so background fetching starts
+  // before the user reaches the end of what's buffered. Uses a threshold of
+  // 4 pages (20 recipes) ahead of the current page.
+  useEffect(() => {
+    if (!session.sessionPoolId || prefetchingRef.current) return;
+    const remaining = recipesRef.current.length - (currentPage + 1) * PAGE_SIZE;
+    if (remaining < 4 * PAGE_SIZE && poolInfo.poolSize > recipesRef.current.length) {
+      _prefetchNextBatch(session.sessionPoolId);
+    }
+  }, [currentPage, recipes.length, poolInfo.poolSize, session.sessionPoolId, _prefetchNextBatch]);
 
   // ── prefetchSubstitutions ─────────────────────────────────────────────────
   const prefetchSubstitutions = useCallback(async (recipeId, recipeIngredients, userIngredients) => {
