@@ -132,6 +132,17 @@ export default function useVlm({ ensureRegistered } = {}) {
   }, []);
 
   /**
+   * Updates the urgency of an ingredient by name (used for drag-and-drop between sections).
+   * @param {string} name - Ingredient name to update.
+   * @param {number|null} urgency - New urgency value, or null for non-perishable.
+   */
+  const updateIngredientUrgency = useCallback((name, urgency) => {
+    setIngredients((prev) =>
+      prev.map((ing) => ing.name === name ? { ...ing, urgency } : ing)
+    );
+  }, []);
+
+  /**
    * Appends a manually-created ingredient to the list.
    * @param {object} ingredient - Ingredient object matching the VLM response schema.
    */
@@ -172,6 +183,7 @@ export default function useVlm({ ensureRegistered } = {}) {
     identifyFromImages,
     confirmIngredient,
     removeIngredient,
+    updateIngredientUrgency,
     addIngredient,
     getConfirmedIngredients,
     removeImage,

@@ -1,11 +1,15 @@
 /**
- * Root layout - wraps the entire app with providers and global config.
+ * Root layout — wraps the entire app with providers and global config.
+ *
+ * GestureHandlerRootView must be the outermost wrapper so that
+ * react-native-gesture-handler's GestureDetector works on any screen.
  */
 
 import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AuthProvider } from '../src/context/AuthContext';
 import { SessionProvider } from '../src/context/SessionContext';
 import { RecipeProvider } from '../src/context/RecipeContext';
@@ -20,6 +24,7 @@ export default function RootLayout() {
   }, []);
 
   return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
     <AuthProvider>
       <SessionProvider>
         <SavedRecipesProvider>
@@ -40,5 +45,6 @@ export default function RootLayout() {
         </SavedRecipesProvider>
       </SessionProvider>
     </AuthProvider>
+    </GestureHandlerRootView>
   );
 }
