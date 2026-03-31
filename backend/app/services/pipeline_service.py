@@ -52,6 +52,38 @@ MAX_REFETCH_ROUNDS = 20
 # ---------------------------------------------------------------------------
 _user_pipeline_status: dict[str, dict] = {}
 
+# ---------------------------------------------------------------------------
+# Per-user background task registry.
+# Tracks every asyncio Task spawned for a user so they can all be cancelled
+# the moment the user starts a new session, preventing old LLM calls from
+# flooding Ollama and starving the new pipeline (which causes 524 timeouts).
+# ---------------------------------------------------------------------------
+_user_bg_tasks: dict[str, set["asyncio.Task"]] = {}
+
+
+def _cancel_user_bg_tasks(user_id: str) -> None:
+    """Cancel and discard all background tasks for a user."""
+    tasks = _user_bg_tasks.pop(user_id, set())
+    if tasks:
+        logger.info(
+            "[%s] Cancelling %d stale background task(s) from previous session",
+            user_id[:8], len(tasks),
+        )
+    for task in tasks:
+        task.cancel()
+
+
+def _register_bg_task(user_id: str, coro) -> "asyncio.Task":
+    """Create a background task, register it under user_id, and auto-remove on completion."""
+    task = asyncio.create_task(coro)
+    _user_bg_tasks.setdefault(user_id, set()).add(task)
+
+    def _on_done(t):
+        _user_bg_tasks.get(user_id, set()).discard(t)
+
+    task.add_done_callback(_on_done)
+    return task
+
 
 def _set_status(user_id: str, step: int, label: str, detail: str = "") -> None:
     """Update the pipeline status for a user."""
@@ -92,6 +124,11 @@ async def run_pipeline(
     cooking_equipment = list(preferences.cooking_equipment or []) if preferences else []
     health_goal = (preferences.health_goal or "none") if preferences else "none"
     history_titles = [h.recipe_id for h in history[:10]]
+
+    # Cancel any background tasks still running from the user's previous session.
+    # Without this, stale re-ideation rounds keep hammering Ollama, queue up
+    # behind the new pipeline, and cause >100 s response times (524 gateway timeout).
+    _cancel_user_bg_tasks(user_id)
 
     # Clear any previous status and start fresh
     clear_pipeline_status(user_id)
@@ -227,7 +264,8 @@ async def run_pipeline(
     # frontend knows more recipes are on the way and keeps "Next" enabled.
     expected_total = len(ranked) + len(rest_suggestions)
     if rest_suggestions:
-        asyncio.create_task(
+        _register_bg_task(
+            user_id,
             _background_fetch_and_append(
                 pool_id=pool_id,
                 suggestions=rest_suggestions,
@@ -246,7 +284,8 @@ async def run_pipeline(
     # batch rarely yields enough recipes for smooth browsing. Starting
     # re-ideation now ensures fresh recipes are ready before the user needs
     # them, rather than waiting until the pool runs low.
-    asyncio.create_task(
+    _register_bg_task(
+        user_id,
         _bg_full_refetch(
             pool_id=pool_id,
             user_id=user_id,
@@ -410,7 +449,8 @@ async def _maybe_chain_reideation(
                 "[chain/%s] Pool still low (%d unshown < %d) — firing chained re-ideation #%d",
                 pool_id[:8], unshown, RE_IDEATION_TRIGGER_THRESHOLD, next_round,
             )
-            asyncio.create_task(
+            _register_bg_task(
+                user_id,
                 _bg_full_refetch(
                     pool_id=pool_id,
                     user_id=user_id,
@@ -747,7 +787,8 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
     ):
         pool.refetch_count = (pool.refetch_count or 0) + 1
         flag_modified(pool, "refetch_count")
-        asyncio.create_task(
+        _register_bg_task(
+            pool.user_id,
             _bg_full_refetch(
                 pool_id=pool.id,
                 user_id=pool.user_id,

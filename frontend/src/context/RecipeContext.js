@@ -38,6 +38,7 @@ import {
 import { useAuth } from './AuthContext';
 import { useSession } from './SessionContext';
 import { getRecommendations, getNextBatch, rerankPool } from '../services/pipelineService';
+import { abortAllPendingRequests } from '../services/api';
 import { getSubstitutions } from '../services/recipeService';
 import { trackEvent } from '../services/eventService';
 import { RECIPE_BATCH_SIZE } from '../constants/config';
@@ -80,6 +81,7 @@ export function RecipeProvider({ children }) {
   // Synchronous refs
   const pipelineRunning = useRef(false);
   const prefetchingRef = useRef(false);
+  const sessionGenRef = useRef(0); // incremented on every reset to invalidate stale prefetch loops
   const shownIdsRef = useRef(new Set());
   const recipesRef = useRef([]);   // mirrors recipes state for async closures
   const currentPageRef = useRef(0);  // mirrors currentPage for async closures
@@ -101,6 +103,11 @@ export function RecipeProvider({ children }) {
     prefetchingRef.current = true;
     setIsBuffering(true);
 
+    // Capture the session generation at the time this loop starts.
+    // If resetRecipes() is called mid-loop, sessionGenRef.current will have
+    // been incremented and the loop will exit cleanly.
+    const myGen = sessionGenRef.current;
+
     // Keep fetching batches until we have PAGES_AHEAD full pages beyond the current.
     // We track bgFetching from the last backend response — while it's true the
     // backend is still running re-ideation rounds so we must NOT give up even
@@ -109,6 +116,8 @@ export function RecipeProvider({ children }) {
     let lastBgFetching = true; // assume true until backend tells us otherwise
 
     while (true) {
+      // Bail out if a new session has started (reset was called).
+      if (sessionGenRef.current !== myGen) break;
       // Check: do we already have enough pages buffered?
       const bufferedPages = Math.floor(recipesRef.current.length / PAGE_SIZE);
       const currentPg = currentPageRef.current;
@@ -204,6 +213,8 @@ export function RecipeProvider({ children }) {
       console.warn('[RecipeContext] startPipeline already running — ignoring duplicate call');
       return;
     }
+    // Abort any stale requests that slipped through before the guard was set.
+    abortAllPendingRequests();
     pipelineRunning.current = true;
     if (!user?.id) {
       setError('Please log in to get recipe recommendations.');
@@ -477,6 +488,10 @@ export function RecipeProvider({ children }) {
   }, [user?.id, session.sessionPoolId]);
 
   const resetRecipes = useCallback(() => {
+    // Increment generation so any running prefetch loop exits on its next iteration.
+    sessionGenRef.current += 1;
+    // Cancel all in-flight HTTP requests immediately.
+    abortAllPendingRequests();
     setRecipes([]);
     setCurrentPage(0);
     setIsBuffering(false);
