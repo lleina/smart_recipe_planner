@@ -9,7 +9,7 @@
  * a review when they're ready — not forced immediately after cooking.
  */
 
-import { View, Text, FlatList, Pressable, Image, Modal, TextInput } from 'react-native';
+import { View, Text, FlatList, Pressable, Image, Modal, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from 'expo-router';
@@ -152,7 +152,11 @@ export default function HistoryScreen() {
         animationType="slide"
         onRequestClose={handleCloseReview}
       >
-        <View className="flex-1 bg-black/50 justify-end">
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          className="flex-1 justify-end"
+        >
+          <View className="bg-black/50 absolute inset-0" />
           <View className="bg-background rounded-t-3xl p-6">
             <View className="flex-row items-center justify-between mb-1">
               <Text className="text-xl font-bold text-text-primary">How did it go?</Text>
@@ -209,7 +213,7 @@ export default function HistoryScreen() {
               </Text>
             </Pressable>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );

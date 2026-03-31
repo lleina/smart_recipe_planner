@@ -237,7 +237,15 @@ export default function RecipeDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [servings, setServings] = useState(null);
   const [cooked, setCooked] = useState(false);
+  const [cookedBannerVisible, setCookedBannerVisible] = useState(false);
   const [imageError, setImageError] = useState(false);
+
+  // Auto-dismiss the cooked banner after 10 s so it doesn't linger forever
+  useEffect(() => {
+    if (!cookedBannerVisible) return;
+    const timerId = setTimeout(() => setCookedBannerVisible(false), 10000);
+    return () => clearTimeout(timerId);
+  }, [cookedBannerVisible]);
 
   // LLM substitution results: maps ingredient name → {have, substitution}
   const [llmSubs, setLlmSubs] = useState(null);
@@ -341,6 +349,7 @@ export default function RecipeDetailScreen() {
   const handleCookThis = async () => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setCooked(true);
+    setCookedBannerVisible(true);
     if (user?.id) await addEntry(id, session.mealType, servings, session.sessionPoolId);
     // No immediate review prompt — people don't cook that fast.
     // The History tab lets them rate and add notes whenever they're ready.
@@ -693,17 +702,26 @@ export default function RecipeDetailScreen() {
 
       {/* Action buttons */}
       <View className="px-6 pb-6 gap-3 border-t border-border pt-4 bg-background">
-        {cooked ? (
-          <View className="py-4 rounded-xl bg-green-50 border border-green-200 px-4">
-            <View className="flex-row items-center gap-2 mb-1">
-              <Ionicons name="checkmark-circle" size={20} color="#16A34A" />
-              <Text className="text-green-700 font-semibold">Added to cooking history!</Text>
+        {cooked && cookedBannerVisible ? (
+          <View className="rounded-xl bg-green-50 border border-green-200 px-4 py-3">
+            <View className="flex-row items-center justify-between">
+              <View className="flex-row items-center gap-2 flex-1">
+                <Ionicons name="checkmark-circle" size={20} color="#16A34A" />
+                <Text className="text-green-700 font-semibold">Added to cooking history!</Text>
+              </View>
+              <Pressable
+                onPress={() => setCookedBannerVisible(false)}
+                hitSlop={12}
+                accessibilityLabel="Dismiss"
+              >
+                <Ionicons name="close" size={18} color="#16A34A" />
+              </Pressable>
             </View>
-            <Text className="text-xs text-green-600 ml-7">
+            <Text className="text-xs text-green-600 ml-7 mt-1">
               Head to the History tab whenever you're done to rate it and add notes.
             </Text>
           </View>
-        ) : (
+        ) : cooked ? null : (
           <Pressable
             onPress={handleCookThis}
             className="bg-primary py-4 rounded-xl items-center flex-row justify-center gap-2 active:opacity-90"
