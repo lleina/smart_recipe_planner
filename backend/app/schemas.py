@@ -264,6 +264,10 @@ class NextBatchResponse(BaseModel):
     shown_count: int
     pool_size: int
     refetch_triggered: bool = False
+    # True while background re-ideation rounds are still in progress so the
+    # frontend knows to keep the Next button alive and not abandon the prefetch
+    # loop even when pool_size == recipes received so far.
+    bg_fetching: bool = False
 
 
 class RerankRequest(BaseModel):

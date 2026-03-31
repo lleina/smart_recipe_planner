@@ -500,6 +500,71 @@ async def _bg_full_refetch(
                 pool_id[:8], len(already_seen_titles),
             )
 
+            # ── Fast cache sweep ────────────────────────────────────────────
+            # Before firing the slow LLM ideation, immediately scan the entire
+            # recipe cache for any recipes not yet in the pool that pass hard
+            # filters. This can shave 60-90 s off the user's wait by serving
+            # cached results the moment a round starts rather than only after
+            # ideation completes. Limit to the 300 most recently cached to keep
+            # the DB query and in-memory ranking fast.
+            try:
+                cache_scan_result = await db.execute(
+                    select(RecipeCache).order_by(RecipeCache.cached_at.desc()).limit(300)
+                )
+                cached_candidates = [
+                    _recipe_cache_to_dict(rc)
+                    for rc in cache_scan_result.scalars().all()
+                    if rc.id not in already_seen_ids
+                ]
+                if cached_candidates:
+                    fast_ranked = await ranking_service.rank_recipes(
+                        recipes=cached_candidates,
+                        context=session_context,
+                        dietary_restrictions=dietary_restrictions,
+                        cuisine_preferences=cuisine_preferences,
+                        cooking_equipment=cooking_equipment,
+                        mode="rules_only",  # skip LLM re-rank — speed matters here
+                    )
+                    # Re-read pool for latest state to avoid clobbering concurrent writes
+                    sweep_pool_result = await db.execute(
+                        select(SessionPool).where(SessionPool.id == pool_id)
+                    )
+                    sweep_pool = sweep_pool_result.scalar_one_or_none()
+                    if sweep_pool:
+                        sweep_slots = list(sweep_pool.recipes or [])
+                        sweep_ids = {s["recipeId"] for s in sweep_slots}
+                        fast_slots: list[dict] = []
+                        for recipe in fast_ranked:
+                            if recipe["id"] in sweep_ids:
+                                continue
+                            sweep_ids.add(recipe["id"])
+                            already_seen_ids.add(recipe["id"])  # keep LLM from re-suggesting
+                            fast_slots.append({
+                                "recipeId": recipe["id"],
+                                "score": recipe.get("score", 0.0),
+                                "status": "unshown",
+                                "shownAt": None,
+                                "rankPosition": len(sweep_slots) + len(fast_slots) + 1,
+                            })
+                        if fast_slots:
+                            sweep_pool.recipes = sweep_slots + fast_slots
+                            sweep_pool.total_fetched = (sweep_pool.total_fetched or 0) + len(fast_slots)
+                            flag_modified(sweep_pool, "recipes")
+                            await db.commit()
+                            logger.info(
+                                "[bg-refetch/%s] Fast cache sweep round #%d: appended %d recipes immediately (pool total=%d)",
+                                pool_id[:8], refetch_index, len(fast_slots), sweep_pool.total_fetched,
+                            )
+                            # Update already_seen_ids so we don't include same titles in LLM prompt
+                            if sweep_ids:
+                                extra_titles_result = await db.execute(
+                                    select(RecipeCache.title).where(RecipeCache.id.in_(list(sweep_ids - {s["recipeId"] for s in sweep_slots})))
+                                )
+                                already_seen_titles = already_seen_titles + [row[0] for row in extra_titles_result.all()]
+            except Exception as sweep_exc:
+                logger.warning("[bg-refetch/%s] Fast cache sweep failed (non-fatal): %s", pool_id[:8], sweep_exc)
+            # ── End fast cache sweep ─────────────────────────────────────────
+
             new_suggestions, _ = await llm_service.ideate_recipes(
                 context=session_context,
                 dietary_restrictions=dietary_restrictions,
@@ -628,6 +693,7 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
             shown_count=pool.shown_count or 0,
             pool_size=effective_pool_size,
             refetch_triggered=False,
+            bg_fetching=(pool.refetch_count or 0) < MAX_REFETCH_ROUNDS,
         )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -704,6 +770,7 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
         shown_count=pool.shown_count,
         pool_size=pool.total_fetched or 0,
         refetch_triggered=refetch,
+        bg_fetching=(pool.refetch_count or 0) < MAX_REFETCH_ROUNDS,
     )
 
 
