@@ -35,12 +35,14 @@ from app.database import async_session as db_session_factory
 
 # Cards returned per page (per "Load More")
 BATCH_SIZE = 5
-# Suggestions resolved before the first response is sent; rest run in background
-INITIAL_FETCH_SIZE = 15
+# Resolve ALL suggestions in the fast path — with ~70% failure + cache
+# collisions, splitting into fast/background just produces duplicates.
+# The LLM ideates 50 suggestions; we resolve them all before responding.
+INITIAL_FETCH_SIZE = 100
 # Trigger a background re-ideation round when fewer than this many unshown
 # recipes remain in the pool. Set to 3× BATCH_SIZE so the user always has at
 # least two full pages buffered before we kick off new LLM ideation.
-RE_IDEATION_TRIGGER_THRESHOLD = 15
+RE_IDEATION_TRIGGER_THRESHOLD = 30
 # Hard cap on re-ideation rounds per session to prevent runaway AI calls.
 MAX_REFETCH_ROUNDS = 20
 
@@ -49,6 +51,38 @@ MAX_REFETCH_ROUNDS = 20
 # Keyed by user_id (one pipeline per user at a time).
 # ---------------------------------------------------------------------------
 _user_pipeline_status: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Per-user background task registry.
+# Tracks every asyncio Task spawned for a user so they can all be cancelled
+# the moment the user starts a new session, preventing old LLM calls from
+# flooding Ollama and starving the new pipeline (which causes 524 timeouts).
+# ---------------------------------------------------------------------------
+_user_bg_tasks: dict[str, set["asyncio.Task"]] = {}
+
+
+def _cancel_user_bg_tasks(user_id: str) -> None:
+    """Cancel and discard all background tasks for a user."""
+    tasks = _user_bg_tasks.pop(user_id, set())
+    if tasks:
+        logger.info(
+            "[%s] Cancelling %d stale background task(s) from previous session",
+            user_id[:8], len(tasks),
+        )
+    for task in tasks:
+        task.cancel()
+
+
+def _register_bg_task(user_id: str, coro) -> "asyncio.Task":
+    """Create a background task, register it under user_id, and auto-remove on completion."""
+    task = asyncio.create_task(coro)
+    _user_bg_tasks.setdefault(user_id, set()).add(task)
+
+    def _on_done(t):
+        _user_bg_tasks.get(user_id, set()).discard(t)
+
+    task.add_done_callback(_on_done)
+    return task
 
 
 def _set_status(user_id: str, step: int, label: str, detail: str = "") -> None:
@@ -91,6 +125,11 @@ async def run_pipeline(
     health_goal = (preferences.health_goal or "none") if preferences else "none"
     history_titles = [h.recipe_id for h in history[:10]]
 
+    # Cancel any background tasks still running from the user's previous session.
+    # Without this, stale re-ideation rounds keep hammering Ollama, queue up
+    # behind the new pipeline, and cause >100 s response times (524 gateway timeout).
+    _cancel_user_bg_tasks(user_id)
+
     # Clear any previous status and start fresh
     clear_pipeline_status(user_id)
 
@@ -103,7 +142,7 @@ async def run_pipeline(
         session_context.available_time_minutes,
         len(session_context.available_ingredients),
     )
-    suggestions = await llm_service.ideate_recipes(
+    suggestions, llm_warning = await llm_service.ideate_recipes(
         context=session_context,
         dietary_restrictions=dietary_restrictions,
         cuisine_preferences=cuisine_preferences,
@@ -204,19 +243,20 @@ async def run_pipeline(
         await db.merge(cached)
 
     now = datetime.now(timezone.utc).isoformat()
-    for pr in pool_recipes[:BATCH_SIZE]:
+    for pr in pool_recipes:
         pr["status"] = "shown"
         pr["shownAt"] = now
-    pool.shown_count = BATCH_SIZE
+    pool.shown_count = len(pool_recipes)
     pool.recipes = pool_recipes
+    flag_modified(pool, "recipes")
 
     await db.commit()
     await db.refresh(pool)
 
     logger.info(
-        "[%s] Stage 5: pool %s created — %d fast recipes, serving first %d. "
+        "[%s] Stage 5: pool %s created — %d fast recipes, serving all %d. "
         "Background fetch of %d more suggestions starting.",
-        user_id[:8], pool_id[:8], len(ranked), min(BATCH_SIZE, len(ranked)), len(rest_suggestions),
+        user_id[:8], pool_id[:8], len(ranked), len(ranked), len(rest_suggestions),
     )
 
     # Stage 3b: Fire background task for remaining suggestions
@@ -224,7 +264,8 @@ async def run_pipeline(
     # frontend knows more recipes are on the way and keeps "Next" enabled.
     expected_total = len(ranked) + len(rest_suggestions)
     if rest_suggestions:
-        asyncio.create_task(
+        _register_bg_task(
+            user_id,
             _background_fetch_and_append(
                 pool_id=pool_id,
                 suggestions=rest_suggestions,
@@ -234,16 +275,39 @@ async def run_pipeline(
                 cooking_equipment=cooking_equipment,
                 existing_ids=set(seen_ids),
                 ranking_mode=effective_mode,
+                user_id=user_id,
             )
         )
 
-    _set_status(user_id, 4, "Recipes ready!", f"Found {min(BATCH_SIZE, len(ranked))} great matches")
+    # Proactive re-ideation: immediately fire the first re-ideation round
+    # alongside the background fetch. With ~70% scrape failure, the initial
+    # batch rarely yields enough recipes for smooth browsing. Starting
+    # re-ideation now ensures fresh recipes are ready before the user needs
+    # them, rather than waiting until the pool runs low.
+    _register_bg_task(
+        user_id,
+        _bg_full_refetch(
+            pool_id=pool_id,
+            user_id=user_id,
+            session_context_dict=session_context.dict(),
+            refetch_index=1,
+        )
+    )
+    # Record the proactive round in the pool (update async — best effort)
+    pool.refetch_count = 1
+    try:
+        await db.commit()
+    except Exception:
+        pass
+
+    _set_status(user_id, 4, "Recipes ready!", f"Found {len(ranked)} great matches")
     return RecommendResponse(
         session_pool_id=pool.id,
-        recipes=[_to_out(r) for r in ranked[:BATCH_SIZE]],
+        recipes=[_to_out(r) for r in ranked],
         pool_size=expected_total,
-        shown_count=min(BATCH_SIZE, len(ranked)),
+        shown_count=len(ranked),
         ranking_mode_used=effective_mode,
+        llm_warning=llm_warning,
     )
 
 
@@ -256,18 +320,26 @@ async def _background_fetch_and_append(
     cooking_equipment: list[str],
     existing_ids: set[str],
     ranking_mode: str,
+    user_id: str = "",
 ) -> None:
     """
     Background task: fetch + rank remaining suggestions and append them to the pool.
     Uses its own DB session since the request session has already been closed.
+
+    After appending, checks whether the pool is still low on unshown recipes
+    and automatically fires a chained re-ideation round if needed.
     """
     logger.info("[bg/%s] Starting background fetch of %d suggestions", pool_id[:8], len(suggestions))
     try:
         async with db_session_factory() as db:
-            recipes_raw = await recipe_fetcher.fetch_recipes_batch(suggestions, session_context, db)
+            recipes_raw = await recipe_fetcher.fetch_recipes_batch(
+                suggestions, session_context, db, exclude_ids=existing_ids,
+            )
 
             if not recipes_raw:
                 logger.info("[bg/%s] Background fetch returned 0 recipes — nothing to append", pool_id[:8])
+                # Still check if chained re-ideation is needed
+                await _maybe_chain_reideation(pool_id, user_id, db)
                 return
 
             ranked = await ranking_service.rank_recipes(
@@ -327,6 +399,7 @@ async def _background_fetch_and_append(
             if new_entries:
                 pool.recipes = current_pool + new_entries
                 pool.total_fetched = (pool.total_fetched or 0) + len(new_entries)
+                flag_modified(pool, "recipes")
                 await db.commit()
                 logger.info(
                     "[bg/%s] Appended %d more recipes to pool (total=%d)",
@@ -335,8 +408,63 @@ async def _background_fetch_and_append(
             else:
                 logger.info("[bg/%s] No new unique recipes to append", pool_id[:8])
 
+            # Chain re-ideation if pool is still low after this background fetch
+            await _maybe_chain_reideation(pool_id, user_id, db)
+
     except Exception as exc:
         logger.error("[bg/%s] Background fetch failed: %s", pool_id[:8], exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Chained re-ideation helper — fires the next round when pool is still low
+# ---------------------------------------------------------------------------
+async def _maybe_chain_reideation(
+    pool_id: str,
+    user_id: str,
+    db: AsyncSession,
+) -> None:
+    """Check if the pool still needs more recipes and fire a re-ideation round if so.
+
+    Called at the end of ``_background_fetch_and_append`` and ``_bg_full_refetch``
+    to create a continuous chain of recipe generation until the buffer is healthy.
+    """
+    if not user_id:
+        return
+    try:
+        result = await db.execute(select(SessionPool).where(SessionPool.id == pool_id))
+        pool = result.scalar_one_or_none()
+        if not pool or not pool.session_context:
+            return
+
+        unshown = sum(1 for r in (pool.recipes or []) if r["status"] == "unshown")
+        refetch_count = pool.refetch_count or 0
+
+        if unshown < RE_IDEATION_TRIGGER_THRESHOLD and refetch_count < MAX_REFETCH_ROUNDS:
+            next_round = refetch_count + 1
+            pool.refetch_count = next_round
+            flag_modified(pool, "refetch_count")
+            await db.commit()
+
+            logger.info(
+                "[chain/%s] Pool still low (%d unshown < %d) — firing chained re-ideation #%d",
+                pool_id[:8], unshown, RE_IDEATION_TRIGGER_THRESHOLD, next_round,
+            )
+            _register_bg_task(
+                user_id,
+                _bg_full_refetch(
+                    pool_id=pool_id,
+                    user_id=user_id,
+                    session_context_dict=pool.session_context,
+                    refetch_index=next_round,
+                )
+            )
+        else:
+            logger.info(
+                "[chain/%s] Pool healthy (%d unshown) or max rounds reached (%d/%d) — no chained re-ideation",
+                pool_id[:8], unshown, refetch_count, MAX_REFETCH_ROUNDS,
+            )
+    except Exception as exc:
+        logger.warning("[chain/%s] Failed to check/chain re-ideation: %s", pool_id[:8], exc)
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +540,72 @@ async def _bg_full_refetch(
                 pool_id[:8], len(already_seen_titles),
             )
 
-            new_suggestions = await llm_service.ideate_recipes(
+            # ── Fast cache sweep ────────────────────────────────────────────
+            # Before firing the slow LLM ideation, immediately scan the entire
+            # recipe cache for any recipes not yet in the pool that pass hard
+            # filters. This can shave 60-90 s off the user's wait by serving
+            # cached results the moment a round starts rather than only after
+            # ideation completes. Limit to the 300 most recently cached to keep
+            # the DB query and in-memory ranking fast.
+            try:
+                cache_scan_result = await db.execute(
+                    select(RecipeCache).order_by(RecipeCache.cached_at.desc()).limit(300)
+                )
+                cached_candidates = [
+                    _recipe_cache_to_dict(rc)
+                    for rc in cache_scan_result.scalars().all()
+                    if rc.id not in already_seen_ids
+                ]
+                if cached_candidates:
+                    fast_ranked = await ranking_service.rank_recipes(
+                        recipes=cached_candidates,
+                        context=session_context,
+                        dietary_restrictions=dietary_restrictions,
+                        cuisine_preferences=cuisine_preferences,
+                        cooking_equipment=cooking_equipment,
+                        mode="rules_only",  # skip LLM re-rank — speed matters here
+                    )
+                    # Re-read pool for latest state to avoid clobbering concurrent writes
+                    sweep_pool_result = await db.execute(
+                        select(SessionPool).where(SessionPool.id == pool_id)
+                    )
+                    sweep_pool = sweep_pool_result.scalar_one_or_none()
+                    if sweep_pool:
+                        sweep_slots = list(sweep_pool.recipes or [])
+                        sweep_ids = {s["recipeId"] for s in sweep_slots}
+                        fast_slots: list[dict] = []
+                        for recipe in fast_ranked:
+                            if recipe["id"] in sweep_ids:
+                                continue
+                            sweep_ids.add(recipe["id"])
+                            already_seen_ids.add(recipe["id"])  # keep LLM from re-suggesting
+                            fast_slots.append({
+                                "recipeId": recipe["id"],
+                                "score": recipe.get("score", 0.0),
+                                "status": "unshown",
+                                "shownAt": None,
+                                "rankPosition": len(sweep_slots) + len(fast_slots) + 1,
+                            })
+                        if fast_slots:
+                            sweep_pool.recipes = sweep_slots + fast_slots
+                            sweep_pool.total_fetched = (sweep_pool.total_fetched or 0) + len(fast_slots)
+                            flag_modified(sweep_pool, "recipes")
+                            await db.commit()
+                            logger.info(
+                                "[bg-refetch/%s] Fast cache sweep round #%d: appended %d recipes immediately (pool total=%d)",
+                                pool_id[:8], refetch_index, len(fast_slots), sweep_pool.total_fetched,
+                            )
+                            # Update already_seen_ids so we don't include same titles in LLM prompt
+                            if sweep_ids:
+                                extra_titles_result = await db.execute(
+                                    select(RecipeCache.title).where(RecipeCache.id.in_(list(sweep_ids - {s["recipeId"] for s in sweep_slots})))
+                                )
+                                already_seen_titles = already_seen_titles + [row[0] for row in extra_titles_result.all()]
+            except Exception as sweep_exc:
+                logger.warning("[bg-refetch/%s] Fast cache sweep failed (non-fatal): %s", pool_id[:8], sweep_exc)
+            # ── End fast cache sweep ─────────────────────────────────────────
+
+            new_suggestions, _ = await llm_service.ideate_recipes(
                 context=session_context,
                 dietary_restrictions=dietary_restrictions,
                 cuisine_preferences=cuisine_preferences,
@@ -426,7 +619,8 @@ async def _bg_full_refetch(
                 return
 
             new_recipes_raw = await recipe_fetcher.fetch_recipes_batch(
-                new_suggestions, session_context, db
+                new_suggestions, session_context, db,
+                exclude_ids=already_seen_ids,
             )
             if not new_recipes_raw:
                 logger.info("[bg-refetch/%s] Web fetch resolved 0 recipes", pool_id[:8])
@@ -502,6 +696,9 @@ async def _bg_full_refetch(
                     pool_id[:8], refetch_index,
                 )
 
+            # Chain: fire another re-ideation round if pool is still low
+            await _maybe_chain_reideation(pool_id, user_id, db)
+
     except Exception as exc:  # pylint: disable=broad-except
         # Top-level background task boundary — must not propagate.
         logger.error(
@@ -512,8 +709,18 @@ async def _bg_full_refetch(
 
 async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchResponse:
     pool_recipes = pool.recipes or []
+    total_in_pool = len(pool_recipes)
+    shown = [r for r in pool_recipes if r["status"] == "shown"]
     unshown = [r for r in pool_recipes if r["status"] == "unshown"]
-    batch_ids = [r["recipeId"] for r in unshown[:BATCH_SIZE]]
+    # Return ALL unshown recipes at once so the frontend can buffer them
+    # locally and page through them instantly. The frontend still displays
+    # exactly PAGE_SIZE (5) per page — it just needs the buffer filled fast.
+    batch_ids = [r["recipeId"] for r in unshown]
+
+    logger.debug(
+        "[get_next_batch/%s] pool_total=%d, shown=%d, unshown=%d, returning=%d",
+        pool.id[:8], total_in_pool, len(shown), len(unshown), len(batch_ids),
+    )
 
     # Guard: if nothing unshown yet (background fetch still in progress),
     # return empty rather than issuing an invalid SQL IN () query.
@@ -526,11 +733,13 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
             shown_count=pool.shown_count or 0,
             pool_size=effective_pool_size,
             refetch_triggered=False,
+            bg_fetching=(pool.refetch_count or 0) < MAX_REFETCH_ROUNDS,
         )
 
     now = datetime.now(timezone.utc).isoformat()
+    batch_id_set = set(batch_ids)
     for pr in pool_recipes:
-        if pr["recipeId"] in batch_ids:
+        if pr["recipeId"] in batch_id_set:
             pr["status"] = "shown"
             pr["shownAt"] = now
     pool.shown_count = (pool.shown_count or 0) + len(batch_ids)
@@ -578,7 +787,8 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
     ):
         pool.refetch_count = (pool.refetch_count or 0) + 1
         flag_modified(pool, "refetch_count")
-        asyncio.create_task(
+        _register_bg_task(
+            pool.user_id,
             _bg_full_refetch(
                 pool_id=pool.id,
                 user_id=pool.user_id,
@@ -601,6 +811,7 @@ async def get_next_batch(pool: SessionPool, db: AsyncSession) -> NextBatchRespon
         shown_count=pool.shown_count,
         pool_size=pool.total_fetched or 0,
         refetch_triggered=refetch,
+        bg_fetching=(pool.refetch_count or 0) < MAX_REFETCH_ROUNDS,
     )
 
 

@@ -704,14 +704,19 @@ def score_rules(
 
     # Equipment inference rules
     _EQUIPMENT_INFER = {
-        "blender": ["smoothie", "puree", "purée", "blend until smooth", "blender"],
+        # Only infer blender when a recipe clearly cannot be made without one.
+        # "blend until smooth" / "puree" / "purée" are too broad — pasta sauces
+        # and many dishes use these phrases but can be made with a whisk or fork.
+        "blender": ["smoothie", "in a blender", "transfer to blender", "using a blender", "blender"],
         "food processor": ["food processor", "pulse until"],
         "grill": ["grilled", "grill marks", "on the grill", "charcoal"],
         "slow cooker": ["slow cooker", "crockpot", "crock pot", "crock-pot"],
         "instant pot": ["instant pot", "pressure cook"],
         "air fryer": ["air fryer", "air fry", "air-fry"],
         "deep fryer": ["deep fry", "deep-fry", "deep fryer"],
-        "wok": ["stir-fry", "stir fry", "wok"],
+        # Stir-frying in a regular skillet/pan is completely normal — only infer
+        # wok requirement when the recipe text explicitly calls for a wok.
+        "wok": ["wok"],
     }
     for equip, keywords in _EQUIPMENT_INFER.items():
         if any(kw in combined_text for kw in keywords):

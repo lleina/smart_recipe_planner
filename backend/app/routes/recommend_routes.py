@@ -20,9 +20,13 @@ Three endpoints orchestrate the full recipe discovery flow:
     Records a user preference signal (saved recipe) against an open pool.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger("app.recommend_routes")
 
 from app.auth import get_current_user_id
 from app.database import get_db
@@ -126,7 +130,19 @@ async def get_next_recipe_page(
     if session_pool.user_id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    return await get_next_batch(session_pool, db)
+    logger.debug(
+        "[GET /recommend/next] pool=%s, total_fetched=%s, shown=%s, refetch_count=%s",
+        session_pool_id[:8],
+        session_pool.total_fetched,
+        session_pool.shown_count,
+        session_pool.refetch_count,
+    )
+    result = await get_next_batch(session_pool, db)
+    logger.debug(
+        "[GET /recommend/next] returning %d recipes, pool_size=%d",
+        len(result.recipes), result.pool_size,
+    )
+    return result
 
 
 @router.get("/recommend/status")

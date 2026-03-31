@@ -247,6 +247,8 @@ class RecommendResponse(BaseModel):
     shown_count: int
     # Recorded for observability — enables A/B comparison between ranking modes.
     ranking_mode_used: Optional[str] = None
+    # Set when the LLM was unreachable and a static fallback list was used instead.
+    llm_warning: Optional[str] = None
 
 
 class NextBatchResponse(BaseModel):
@@ -262,6 +264,10 @@ class NextBatchResponse(BaseModel):
     shown_count: int
     pool_size: int
     refetch_triggered: bool = False
+    # True while background re-ideation rounds are still in progress so the
+    # frontend knows to keep the Next button alive and not abandon the prefetch
+    # loop even when pool_size == recipes received so far.
+    bg_fetching: bool = False
 
 
 class RerankRequest(BaseModel):

@@ -38,6 +38,7 @@ import {
 import { useAuth } from './AuthContext';
 import { useSession } from './SessionContext';
 import { getRecommendations, getNextBatch, rerankPool } from '../services/pipelineService';
+import { abortAllPendingRequests } from '../services/api';
 import { getSubstitutions } from '../services/recipeService';
 import { trackEvent } from '../services/eventService';
 import { RECIPE_BATCH_SIZE } from '../constants/config';
@@ -45,8 +46,8 @@ import { RECIPE_BATCH_SIZE } from '../constants/config';
 const RecipeContext = createContext(null);
 
 const PAGE_SIZE = RECIPE_BATCH_SIZE; // 5
-const PREFETCH_RETRY_DELAY_MS = 1500;
-const PREFETCH_MAX_RETRIES = 20;
+const PREFETCH_RETRY_DELAY_MS = 800;
+const PREFETCH_MAX_RETRIES = 30;
 // Buffer all available recipes aggressively (backend generates ~40 = 8 pages)
 const PAGES_AHEAD = 8;
 
@@ -63,7 +64,8 @@ export function RecipeProvider({ children }) {
   const [recipes, setRecipes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [poolInfo, setPoolInfo] = useState({ poolSize: 0, shownCount: 0 });
+  const [llmWarning, setLlmWarning] = useState(null);
+  const [poolInfo, setPoolInfo] = useState({ poolSize: 0, shownCount: 0, bgFetching: true });
 
   // Current page index (0-based)
   const [currentPage, setCurrentPage] = useState(0);
@@ -79,6 +81,7 @@ export function RecipeProvider({ children }) {
   // Synchronous refs
   const pipelineRunning = useRef(false);
   const prefetchingRef = useRef(false);
+  const sessionGenRef = useRef(0); // incremented on every reset to invalidate stale prefetch loops
   const shownIdsRef = useRef(new Set());
   const recipesRef = useRef([]);   // mirrors recipes state for async closures
   const currentPageRef = useRef(0);  // mirrors currentPage for async closures
@@ -100,22 +103,46 @@ export function RecipeProvider({ children }) {
     prefetchingRef.current = true;
     setIsBuffering(true);
 
-    // Keep fetching batches until we have PAGES_AHEAD full pages beyond the current
-    let consecutiveEmpties = 0;
+    // Capture the session generation at the time this loop starts.
+    // If resetRecipes() is called mid-loop, sessionGenRef.current will have
+    // been incremented and the loop will exit cleanly.
+    const myGen = sessionGenRef.current;
 
-    while (consecutiveEmpties <= PREFETCH_MAX_RETRIES) {
+    // Keep fetching batches until we have PAGES_AHEAD full pages beyond the current.
+    // We track bgFetching from the last backend response — while it's true the
+    // backend is still running re-ideation rounds so we must NOT give up even
+    // after many consecutive empty responses.
+    let consecutiveEmpties = 0;
+    let lastBgFetching = true; // assume true until backend tells us otherwise
+
+    while (true) {
+      // Bail out if a new session has started (reset was called).
+      if (sessionGenRef.current !== myGen) break;
       // Check: do we already have enough pages buffered?
       const bufferedPages = Math.floor(recipesRef.current.length / PAGE_SIZE);
       const currentPg = currentPageRef.current;
       if (bufferedPages >= currentPg + 1 + PAGES_AHEAD) {
-        // We have enough — stop prefetching
+        // We have enough buffered — stop for now (proactive effect will restart)
+        break;
+      }
+
+      // If the backend has definitively finished all refetch rounds AND we've
+      // had many empties in a row, give up.
+      if (!lastBgFetching && consecutiveEmpties > PREFETCH_MAX_RETRIES) {
         break;
       }
 
       try {
         const result = await getNextBatch(poolId);
+        lastBgFetching = result.bgFetching ?? lastBgFetching;
         const incoming = (result.recipes || []).filter(
           (r) => !shownIdsRef.current.has(r.id)
+        );
+
+        console.log(
+          `[prefetch] getNextBatch returned ${(result.recipes || []).length} recipes, ` +
+          `${incoming.length} new (after dedup), recipesLen=${recipesRef.current.length}, ` +
+          `poolSize=${result.poolSize}, bgFetching=${lastBgFetching}, consecutiveEmpties=${consecutiveEmpties}`
         );
 
         if (incoming.length > 0) {
@@ -123,6 +150,7 @@ export function RecipeProvider({ children }) {
           setRecipes((prev) => {
             const updated = [...prev, ...incoming];
             recipesRef.current = updated;
+            console.log(`[prefetch] recipes buffer grew: ${prev.length} → ${updated.length}`);
             return updated;
           });
           // Never decrease poolSize — the initial response sets an optimistic
@@ -130,6 +158,7 @@ export function RecipeProvider({ children }) {
           setPoolInfo((prev) => ({
             poolSize: Math.max(prev.poolSize, result.poolSize),
             shownCount: result.shownCount,
+            bgFetching: result.bgFetching ?? prev.bgFetching,
           }));
           batchAddShownRecipeIds(incoming.map((r) => r.id));
           consecutiveEmpties = 0; // reset on success
@@ -138,28 +167,30 @@ export function RecipeProvider({ children }) {
         } else {
           // 0 new recipes — backend pool may still be populating.
           // Update poolSize (never decrease) so hasNextPage stays accurate.
-          if (result.poolSize) {
+          if (result.poolSize || result.bgFetching != null) {
             setPoolInfo((prev) => ({
-              poolSize: Math.max(prev.poolSize, result.poolSize),
+              poolSize: Math.max(prev.poolSize, result.poolSize || 0),
               shownCount: prev.shownCount,
+              bgFetching: result.bgFetching ?? prev.bgFetching,
             }));
           }
           consecutiveEmpties++;
-          if (consecutiveEmpties <= PREFETCH_MAX_RETRIES) {
-            // Use longer delays as we wait — background fetch may still be scraping
-            const delay = Math.min(PREFETCH_RETRY_DELAY_MS * (1 + Math.floor(consecutiveEmpties / 3)), 5000);
-            await new Promise((resolve) => setTimeout(resolve, delay));
-          }
+          // Use the same back-off regardless of bgFetching — keep lag short so
+          // the frontend notices new recipes quickly when a bg round completes.
+          const delay = Math.min(PREFETCH_RETRY_DELAY_MS * (1 + Math.floor(consecutiveEmpties / 3)), 2500);
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       } catch (err) {
         console.warn('[RecipeContext] _prefetchNextBatch error:', err.message);
         consecutiveEmpties++;
-        if (consecutiveEmpties <= PREFETCH_MAX_RETRIES) {
-          await new Promise((resolve) => setTimeout(resolve, PREFETCH_RETRY_DELAY_MS));
-        }
+        await new Promise((resolve) => setTimeout(resolve, PREFETCH_RETRY_DELAY_MS));
       }
     }
 
+    console.log(
+      `[prefetch] loop ended — consecutiveEmpties=${consecutiveEmpties}, lastBgFetching=${lastBgFetching}, ` +
+      `recipesLen=${recipesRef.current.length}, bufferedPages=${Math.floor(recipesRef.current.length / PAGE_SIZE)}`
+    );
     prefetchingRef.current = false;
     setIsBuffering(false);
   }, [batchAddShownRecipeIds]);
@@ -182,6 +213,8 @@ export function RecipeProvider({ children }) {
       console.warn('[RecipeContext] startPipeline already running — ignoring duplicate call');
       return;
     }
+    // Abort any stale requests that slipped through before the guard was set.
+    abortAllPendingRequests();
     pipelineRunning.current = true;
     if (!user?.id) {
       setError('Please log in to get recipe recommendations.');
@@ -196,7 +229,7 @@ export function RecipeProvider({ children }) {
     setCurrentPage(0);
     setIsBuffering(false);
     setNextPagePending(false);
-    setPoolInfo({ poolSize: 0, shownCount: 0 });
+    setPoolInfo({ poolSize: 0, shownCount: 0, bgFetching: true });
     setSubstitutionsCache({});
     prefetchingRef.current = false;
     shownIdsRef.current = new Set();
@@ -207,13 +240,19 @@ export function RecipeProvider({ children }) {
       const result = await getRecommendations(user.id, sessionContext);
       const firstPage = result.recipes || [];
 
+      console.log(
+        `[startPipeline] pipeline returned ${firstPage.length} recipes, ` +
+        `poolSize=${result.poolSize}, shownCount=${result.shownCount}`
+      );
+
       firstPage.forEach((r) => shownIdsRef.current.add(r.id));
       recipesRef.current = firstPage;
 
       setRecipes(firstPage);
       setCurrentPage(0);
       updateSession({ sessionPoolId: result.sessionPoolId });
-      setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount });
+      setPoolInfo({ poolSize: result.poolSize, shownCount: result.shownCount, bgFetching: true });
+      setLlmWarning(result.llmWarning || null);
       batchAddShownRecipeIds(firstPage.map((r) => r.id));
 
       trackEvent({
@@ -246,9 +285,11 @@ export function RecipeProvider({ children }) {
   const hasNextPage = useMemo(() => {
     const nextEnd = (currentPage + 1) * PAGE_SIZE + PAGE_SIZE;
     if (nextEnd <= recipes.length) return true; // full page of 5 ready
-    // Data still coming — show as available so user sees loading state
-    return poolInfo.poolSize > recipes.length || isBuffering || nextPagePending;
-  }, [currentPage, recipes.length, poolInfo.poolSize, isBuffering, nextPagePending]);
+    // Data still coming — show as available so user sees loading state.
+    // bgFetching means the backend is still running re-ideation rounds so
+    // more recipes will arrive even after pool_size == recipes received.
+    return poolInfo.poolSize > recipes.length || isBuffering || nextPagePending || poolInfo.bgFetching;
+  }, [currentPage, recipes.length, poolInfo.poolSize, isBuffering, nextPagePending, poolInfo.bgFetching]);
   const hasPrevPage = currentPage > 0;
 
   // Keep currentPageRef in sync for the async prefetcher
@@ -268,7 +309,14 @@ export function RecipeProvider({ children }) {
     const poolExhausted = !isBuffering && !prefetchingRef.current &&
       poolInfo.poolSize > 0 && poolInfo.poolSize <= recipesRef.current.length;
 
+    console.log(
+      `[nextPage] currentPage=${currentPage}, recipesLen=${recipesRef.current.length}, ` +
+      `nextStart=${nextStart}, nextEnd=${nextEnd}, poolSize=${poolInfo.poolSize}, ` +
+      `isBuffering=${isBuffering}, prefetching=${prefetchingRef.current}, poolExhausted=${poolExhausted}`
+    );
+
     if (nextEnd <= recipesRef.current.length) {
+      console.log('[nextPage] BRANCH: full page available — advancing');
       // Full page of PAGE_SIZE recipes available — advance immediately.
       const newPage = currentPage + 1;
       setCurrentPage(newPage);
@@ -279,11 +327,13 @@ export function RecipeProvider({ children }) {
         _prefetchNextBatch(session.sessionPoolId);
       }
     } else if (nextStart < recipesRef.current.length && poolExhausted) {
+      console.log('[nextPage] BRANCH: partial last page (pool exhausted) — advancing');
       // Partial last page — pool is done, show whatever we have
       const newPage = currentPage + 1;
       setCurrentPage(newPage);
       currentPageRef.current = newPage;
     } else if (prefetchingRef.current || isBuffering) {
+      console.log('[nextPage] BRANCH: not enough data, prefetch in flight — PENDING');
       // Not enough data yet but prefetch in flight — show loading state
       setNextPagePending(true);
       // Ensure prefetch is running
@@ -291,6 +341,7 @@ export function RecipeProvider({ children }) {
         _prefetchNextBatch(session.sessionPoolId);
       }
     } else {
+      console.log('[nextPage] BRANCH: not enough data, no prefetch — PENDING + kick fetch');
       // Not enough data, no prefetch — kick off a fetch now
       setNextPagePending(true);
       _prefetchNextBatch(session.sessionPoolId);
@@ -300,7 +351,12 @@ export function RecipeProvider({ children }) {
   // ── prevPage ──────────────────────────────────────────────────────────────
   const prevPage = useCallback(() => {
     setCurrentPage((p) => Math.max(0, p - 1));
-  }, []);
+    // User is actively browsing — ensure background prefetch is running so
+    // recipes keep accumulating for when they navigate forward again.
+    if (session.sessionPoolId && !prefetchingRef.current) {
+      _prefetchNextBatch(session.sessionPoolId);
+    }
+  }, [session.sessionPoolId, _prefetchNextBatch]);
 
   // ── Effect: auto-advance when pending and new data arrives ─────────────
   // We watch recipes.length; when it grows and nextPagePending is true, advance.
@@ -363,8 +419,34 @@ export function RecipeProvider({ children }) {
       setCurrentPage(p + 1);
       currentPageRef.current = p + 1;
       setNextPagePending(false);
+    } else if (poolExhausted) {
+      // Pool is truly exhausted — nothing more to show, clear the pending state
+      setNextPagePending(false);
+    } else if (session.sessionPoolId) {
+      // Pool may still be building (re-ideation in progress) — restart prefetch
+      // after a short pause so we don't spin-hammer the backend immediately.
+      const timer = setTimeout(() => {
+        if (pendingRef.current && !prefetchingRef.current) {
+          _prefetchNextBatch(session.sessionPoolId);
+        }
+      }, 2000);
+      return () => clearTimeout(timer);
     }
-  }, [isBuffering, nextPagePending, poolInfo.poolSize]);
+  }, [isBuffering, nextPagePending, poolInfo.poolSize, session.sessionPoolId, _prefetchNextBatch]);
+
+  // ── Proactive prefetch: restart when buffer ahead drops below 20 recipes ────
+  // Triggers independently of user navigation so background fetching starts
+  // before the user reaches the end of what's buffered. Uses a threshold of
+  // 4 pages (20 recipes) ahead of the current page.
+  useEffect(() => {
+    if (!session.sessionPoolId || prefetchingRef.current) return;
+    const remaining = recipesRef.current.length - (currentPage + 1) * PAGE_SIZE;
+    // Restart prefetch when buffer is running low AND either the pool has more
+    // recipes ready OR the backend is still running bg re-ideation rounds.
+    if (remaining < 4 * PAGE_SIZE && (poolInfo.poolSize > recipesRef.current.length || poolInfo.bgFetching)) {
+      _prefetchNextBatch(session.sessionPoolId);
+    }
+  }, [currentPage, recipes.length, poolInfo.poolSize, poolInfo.bgFetching, session.sessionPoolId, _prefetchNextBatch]);
 
   // ── prefetchSubstitutions ─────────────────────────────────────────────────
   const prefetchSubstitutions = useCallback(async (recipeId, recipeIngredients, userIngredients) => {
@@ -406,12 +488,17 @@ export function RecipeProvider({ children }) {
   }, [user?.id, session.sessionPoolId]);
 
   const resetRecipes = useCallback(() => {
+    // Increment generation so any running prefetch loop exits on its next iteration.
+    sessionGenRef.current += 1;
+    // Cancel all in-flight HTTP requests immediately.
+    abortAllPendingRequests();
     setRecipes([]);
     setCurrentPage(0);
     setIsBuffering(false);
     setNextPagePending(false);
     setError(null);
-    setPoolInfo({ poolSize: 0, shownCount: 0 });
+    setLlmWarning(null);
+    setPoolInfo({ poolSize: 0, shownCount: 0, bgFetching: true });
     setSubstitutionsCache({});
     shownIdsRef.current = new Set();
     prefetchingRef.current = false;
@@ -430,6 +517,7 @@ export function RecipeProvider({ children }) {
     hasPrevPage,
     loading,
     error,
+    llmWarning,
     poolInfo,
     isBuffering,
     nextPagePending,
@@ -443,7 +531,7 @@ export function RecipeProvider({ children }) {
   }), [
     recipes, currentPage, currentPageRecipes, totalPages,
     hasNextPage, hasPrevPage,
-    loading, error, poolInfo,
+    loading, error, llmWarning, poolInfo,
     isBuffering, nextPagePending,
     substitutionsCache,
     startPipeline, nextPage, prevPage, prefetchSubstitutions, rerank, resetRecipes,

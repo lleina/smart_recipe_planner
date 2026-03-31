@@ -4,11 +4,14 @@
  * Completable in under 30 seconds (BR-CTX-06).
  */
 
-import { useState, useRef } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { useState, useRef, useCallback } from 'react';
+import { View, Text, ScrollView, Pressable, TextInput, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
+import Animated, { useSharedValue, useAnimatedStyle, runOnJS } from 'react-native-reanimated';
+import { GestureDetector, Gesture } from 'react-native-gesture-handler';
 import { useSession } from '../../src/context/SessionContext';
 import { useAuth } from '../../src/context/AuthContext';
 import useVlm from '../../src/hooks/useVlm';
@@ -37,6 +40,51 @@ export default function SessionSetupScreen() {
   const [noIngredients, setNoIngredients] = useState(false);
   const scrollRef = useRef(null);
   const manualInputRef = useRef(null);
+  const [isInputFocused, setIsInputFocused] = useState(false);
+
+  // ── Drag-and-drop state ──────────────────────────────────────────────────
+  const [draggingIngredient, setDraggingIngredient] = useState(null);
+  const [isDraggingState, setIsDraggingState] = useState(false);
+  const isDragging = useSharedValue(false);
+  const dragX = useSharedValue(0);
+  const dragY = useSharedValue(0);
+  const perishableRef = useRef(null);
+  const stableRef = useRef(null);
+  const perishableBoundsRef = useRef(null);
+  const stableBoundsRef = useRef(null);
+
+  const dragOverlayStyle = useAnimatedStyle(() => ({
+    opacity: isDragging.value ? 0.9 : 0,
+    transform: [
+      { translateX: dragX.value - 50 },
+      { translateY: dragY.value - 20 },
+    ],
+  }));
+
+  const startDrag = useCallback((ing, absX, absY) => {
+    perishableRef.current?.measureInWindow((x, y, w, h) => {
+      perishableBoundsRef.current = { x, y, w, h };
+    });
+    stableRef.current?.measureInWindow((x, y, w, h) => {
+      stableBoundsRef.current = { x, y, w, h };
+    });
+    dragX.value = absX;
+    dragY.value = absY;
+    setDraggingIngredient(ing);
+    setIsDraggingState(true);
+  }, [dragX, dragY]);
+
+  const endDrag = useCallback((ingName, absX, absY) => {
+    const pb = perishableBoundsRef.current;
+    const sb = stableBoundsRef.current;
+    if (pb && absX >= pb.x && absX <= pb.x + pb.w && absY >= pb.y && absY <= pb.y + pb.h) {
+      vlm.updateIngredientUrgency(ingName, PERISHABLE_URGENCY_DAYS);
+    } else if (sb && absX >= sb.x && absX <= sb.x + sb.w && absY >= sb.y && absY <= sb.y + sb.h) {
+      vlm.updateIngredientUrgency(ingName, null);
+    }
+    setDraggingIngredient(null);
+    setIsDraggingState(false);
+  }, [vlm]);
 
   /** Adds the current manual ingredient text input as a confirmed ingredient. */
   const handleAddManual = () => {
@@ -49,6 +97,7 @@ export default function SessionSetupScreen() {
       urgency: null,
       estimated_quantity: 1,
       unit: 'pieces',
+      source: 'manual',
       confirmed: true,
     });
     setManualIngredient('');
@@ -94,11 +143,7 @@ export default function SessionSetupScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      className="flex-1"
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={0}
-    >
+    <View style={{ flex: 1 }}>
     <SafeAreaView className="flex-1 bg-background">
       <View className="px-6 pt-4 pb-2 flex-row items-center">
         <Pressable onPress={() => router.back()} className="mr-4" accessibilityLabel="Go back">
@@ -112,6 +157,7 @@ export default function SessionSetupScreen() {
         className="flex-1 px-6"
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        scrollEnabled={!isInputFocused && !isDraggingState}
       >
 
         {/* Ingredients — required, moved to top */}
@@ -172,7 +218,7 @@ export default function SessionSetupScreen() {
             <Text className="text-sm text-red-500 mb-2">{vlm.error}</Text>
           ) : null}
 
-          {/* Ingredient tags — split into Perishable / Non-perishable */}
+          {/* Ingredient tags — Perishable / Non-perishable in separate boxes */}
           {vlm.ingredients.length > 0 ? (() => {
             const perishable = vlm.ingredients.filter(
               (i) => i.urgency != null && i.urgency <= PERISHABLE_URGENCY_DAYS
@@ -181,47 +227,55 @@ export default function SessionSetupScreen() {
               (i) => !(i.urgency != null && i.urgency <= PERISHABLE_URGENCY_DAYS)
             );
             return (
-              <View className="mb-3">
-                {perishable.length > 0 ? (
-                  <View className="mb-3">
-                    <Text className="text-xs font-semibold text-red-500 uppercase tracking-wide mb-2">
-                      Perishable — use soon
-                    </Text>
+              <View className="mb-3 gap-2">
+                <View ref={perishableRef} className="rounded-xl border border-border bg-surface p-3">
+                  <Text className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">
+                    Perishable — use soon
+                  </Text>
+                  {perishable.length > 0 ? (
                     <View className="flex-row flex-wrap">
                       {perishable.map((ing) => (
-                        <IngredientTag
+                        <DraggableIngredientTag
                           key={ing.name}
                           ingredient={ing}
                           onConfirm={() => { vlm.confirmIngredient(ing.name); setNoIngredients(false); }}
                           onRemove={() => vlm.removeIngredient(ing.name)}
+                          dragX={dragX}
+                          dragY={dragY}
+                          isDragging={isDragging}
+                          onDragStart={startDrag}
+                          onDragEnd={endDrag}
                         />
                       ))}
                     </View>
-                  </View>
-                ) : null}
-                {stable.length > 0 ? (
-                  <View>
-                    {perishable.length > 0 ? (
-                      <Text className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">
-                        Non-perishable
-                      </Text>
-                    ) : (
-                      <Text className="text-sm font-medium text-text-secondary mb-2">
-                        Tap to confirm or remove:
-                      </Text>
-                    )}
+                  ) : (
+                    <Text className="text-xs text-text-muted italic">Hold &amp; drag an ingredient here to mark as perishable</Text>
+                  )}
+                </View>
+                <View ref={stableRef} className="rounded-xl border border-border bg-surface p-3">
+                  <Text className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">
+                    Non-perishable
+                  </Text>
+                  {stable.length > 0 ? (
                     <View className="flex-row flex-wrap">
                       {stable.map((ing) => (
-                        <IngredientTag
+                        <DraggableIngredientTag
                           key={ing.name}
                           ingredient={ing}
                           onConfirm={() => { vlm.confirmIngredient(ing.name); setNoIngredients(false); }}
                           onRemove={() => vlm.removeIngredient(ing.name)}
+                          dragX={dragX}
+                          dragY={dragY}
+                          isDragging={isDragging}
+                          onDragStart={startDrag}
+                          onDragEnd={endDrag}
                         />
                       ))}
                     </View>
-                  </View>
-                ) : null}
+                  ) : (
+                    <Text className="text-xs text-text-muted italic">Hold &amp; drag an ingredient here to mark as non-perishable</Text>
+                  )}
+                </View>
               </View>
             );
           })() : null}
@@ -233,9 +287,8 @@ export default function SessionSetupScreen() {
               value={manualIngredient}
               onChangeText={(t) => { setManualIngredient(t); if (t) setNoIngredients(false); }}
               onSubmitEditing={handleAddManual}
-              onFocus={() => {
-                setTimeout(() => scrollRef.current?.scrollTo({ y: 0, animated: true }), 200);
-              }}
+              onFocus={() => setIsInputFocused(true)}
+              onBlur={() => setIsInputFocused(false)}
               placeholder="Add ingredient manually…"
               placeholderTextColor="#94A3B8"
               className="flex-1 border border-border rounded-xl px-4 py-3 text-sm text-text-primary bg-surface"
@@ -391,32 +444,71 @@ export default function SessionSetupScreen() {
         <Button title="Find Recipes" onPress={handleStartDiscovery} />
       </View>
     </SafeAreaView>
-    </KeyboardAvoidingView>
+
+    {/* Floating drag overlay — renders above everything, follows the dragged tag */}
+    <Animated.View
+      style={[{ position: 'absolute', left: 0, top: 0, zIndex: 100 }, dragOverlayStyle]}
+      pointerEvents="none"
+    >
+      <View style={{ backgroundColor: '#2563EB', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 }}>
+        <Text style={{ color: 'white', fontSize: 14, fontWeight: '500' }}>
+          {draggingIngredient?.name ?? ''}
+        </Text>
+      </View>
+    </Animated.View>
+    </View>
   );
 }
 
-function IngredientTag({ ingredient, onConfirm, onRemove }) {
+function DraggableIngredientTag({ ingredient, onConfirm, onRemove, dragX, dragY, isDragging, onDragStart, onDragEnd }) {
   const isConfirmed = ingredient.confirmed;
 
+  const hapticAndStart = useCallback((ing, absX, absY) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    onDragStart(ing, absX, absY);
+  }, [onDragStart]);
+
+  const dragGesture = Gesture.Pan()
+    .activateAfterLongPress(350)
+    .onStart((e) => {
+      isDragging.value = true;
+      dragX.value = e.absoluteX;
+      dragY.value = e.absoluteY;
+      runOnJS(hapticAndStart)(ingredient, e.absoluteX, e.absoluteY);
+    })
+    .onUpdate((e) => {
+      dragX.value = e.absoluteX;
+      dragY.value = e.absoluteY;
+    })
+    .onEnd((e) => {
+      isDragging.value = false;
+      runOnJS(onDragEnd)(ingredient.name, e.absoluteX, e.absoluteY);
+    })
+    .onFinalize(() => {
+      isDragging.value = false;
+    });
+
   return (
-    <View className={'flex-row items-center rounded-full px-3 py-1.5 mr-2 mb-2 border ' + (
-      isConfirmed
-        ? 'bg-green-50 border-green-300'
-        : 'bg-gray-50 border-border'
-    )}>
-      <Pressable onPress={isConfirmed ? undefined : onConfirm} accessibilityLabel={'Confirm ' + ingredient.name}>
-        <Text className={'text-sm font-medium ' + (
-          isConfirmed ? 'text-green-700' : 'text-text-secondary'
-        )}>
-          {ingredient.name}
-          {ingredient.estimated_quantity && ingredient.estimated_quantity > 0
-            ? ' (' + ingredient.estimated_quantity + ' ' + ingredient.unit + ')'
-            : ''}
-        </Text>
-      </Pressable>
-      <Pressable onPress={onRemove} className="ml-1.5" accessibilityLabel={'Remove ' + ingredient.name}>
-        <Ionicons name="close-circle" size={16} color="#94A3B8" />
-      </Pressable>
-    </View>
+    <GestureDetector gesture={dragGesture}>
+      <Animated.View className={'flex-row items-center rounded-full px-3 py-1.5 mr-2 mb-2 border ' + (
+        isConfirmed
+          ? 'bg-green-50 border-green-300'
+          : 'bg-gray-50 border-border'
+      )}>
+        <Pressable onPress={isConfirmed ? undefined : onConfirm} accessibilityLabel={'Confirm ' + ingredient.name}>
+          <Text className={'text-sm font-medium ' + (
+            isConfirmed ? 'text-green-700' : 'text-text-secondary'
+          )}>
+            {ingredient.name}
+            {ingredient.source !== 'manual' && ingredient.estimated_quantity && ingredient.estimated_quantity > 0
+              ? ' (' + ingredient.estimated_quantity + ' ' + ingredient.unit + ')'
+              : ''}
+          </Text>
+        </Pressable>
+        <Pressable onPress={onRemove} className="ml-1.5" accessibilityLabel={'Remove ' + ingredient.name}>
+          <Ionicons name="close-circle" size={16} color="#94A3B8" />
+        </Pressable>
+      </Animated.View>
+    </GestureDetector>
   );
 }

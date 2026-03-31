@@ -17,6 +17,7 @@ Default model: qwen3:4b (via Ollama, native ``/api/chat`` endpoint).
 import json
 import logging
 import re
+import httpx
 from app.config import LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_SECONDS, LLM_API_KEY
 from app.services.inference_client import ollama_chat
 from app.schemas import SessionContextRequest, IngredientItem
@@ -129,7 +130,7 @@ def _fix_truncated_json_array(raw_json: str) -> str:
 
 
 # Number of recipe suggestions to generate per LLM ideation call.
-_IDEATION_COUNT = 25
+_IDEATION_COUNT = 80
 # Maximum attempts to call the LLM before falling back to the keyword list.
 _MAX_LLM_RETRIES = 3
 
@@ -378,7 +379,7 @@ async def ideate_recipes(
     health_goal: str,
     history_titles: list[str],
     cooking_equipment: list[str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], str | None]:
     """Generate recipe name suggestions using the configured LLM.
 
     Calls the LLM up to ``_MAX_LLM_RETRIES + 1`` times, retrying on parse
@@ -394,26 +395,27 @@ async def ideate_recipes(
         cooking_equipment: Available equipment for hard filtering in the prompt.
 
     Returns:
-        List of suggestion dicts, each with keys:
-        ``name``, ``key_ingredients``, ``cuisine``, ``estimated_time``.
-        Typically ~25 items; may be fewer if the LLM or fallback returns less.
+        Tuple of ``(suggestions, llm_warning)``. ``llm_warning`` is a
+        user-facing string when a connectivity fallback was triggered,
+        ``None`` on success.
     """
     if not LLM_BASE_URL:
         logger.info("LLM_BASE_URL not set — returning fallback suggestions")
-        return _fallback_suggestions(context)
+        return _fallback_suggestions(context), None
 
+    llm_warning: str | None = None
     for attempt in range(_MAX_LLM_RETRIES + 1):
         try:
             logger.info("Calling LLM (%s) for %d suggestions (meal=%s, time=%dmin) [attempt %d/%d]",
                         LLM_MODEL, _IDEATION_COUNT, context.meal_type,
-                        context.available_time_minutes, attempt + 1, MAX_RETRIES + 1)
+                        context.available_time_minutes, attempt + 1, _MAX_LLM_RETRIES + 1)
             parsed_suggestions = await _call_llm(
                 context, dietary_restrictions, cuisine_preferences,
                 health_goal, history_titles, cooking_equipment or []
             )
             if len(parsed_suggestions) >= 5:
                 logger.info("LLM returned %d suggestions", len(parsed_suggestions))
-                return parsed_suggestions
+                return parsed_suggestions, None
             logger.warning(
                 "LLM returned only %d suggestions (attempt %d/%d) — retrying",
                 len(parsed_suggestions), attempt + 1, _MAX_LLM_RETRIES + 1,
@@ -430,13 +432,15 @@ async def ideate_recipes(
                 "LLM ideation failed after %d attempts (%s: %s) — using fallback",
                 _MAX_LLM_RETRIES + 1, type(parse_error).__name__, parse_error,
             )
-        except Exception as llm_error:  # pylint: disable=broad-except
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError, OSError) as conn_err:
             logger.warning(
-                "LLM ideation failed (%s: %s) — using fallback",
-                type(llm_error).__name__, llm_error,
+                "LLM unavailable (%s: %s) — using fallback suggestions",
+                type(conn_err).__name__, conn_err,
             )
+            llm_warning = "AI suggestions unavailable — showing popular matches"
             break
-    return _fallback_suggestions(context)
+        # All other exceptions propagate — code bugs must not be silently swallowed
+    return _fallback_suggestions(context), llm_warning
 
 
 async def _call_llm(

@@ -297,3 +297,142 @@ class TestRecipeDetail:
         data = response.json()
         assert "substitutions" in data, f"Response missing 'substitutions': {data}"
         assert isinstance(data["substitutions"], list)
+
+
+@pytest.mark.slow
+class TestSessionRestartCancellation:
+    """
+    Regression tests for background-task flooding (524 gateway timeout bug).
+
+    When the user ends a session and starts a new one, the backend must cancel
+    all background tasks (re-ideation rounds, background fetches) from the
+    previous session before starting the new pipeline.  Without this, stale
+    LLM calls queue up in Ollama behind the new pipeline and push the total
+    request time well past Cloudflare's 100 s gateway timeout.
+    """
+
+    # Tighter deadline for the *second* pipeline — it must not be delayed
+    # by leftover work from the first session.
+    RESTART_TIMEOUT_SECONDS = 120  # 2 min; first pipeline is allowed longer
+
+    def test_second_pipeline_completes_within_timeout(
+        self, api_base, registered_user, auth_headers
+    ):
+        """
+        Start a pipeline, then immediately start a second one for the same user.
+        The second pipeline must complete within RESTART_TIMEOUT_SECONDS.
+
+        Fails if old background tasks are still running and blocking Ollama,
+        because the new pipeline would queue behind them and time out.
+        """
+        import time
+        user_id, _ = registered_user
+
+        # First pipeline — short timeout so we don't wait; we just need it to
+        # kick off background tasks before we interrupt it.
+        try:
+            requests.post(
+                f"{api_base}/recommend",
+                json={"userId": user_id, "sessionContext": {
+                    "mealType": "lunch",
+                    "availableTimeMinutes": 30,
+                    "servingCount": 2,
+                    "occasion": "",
+                    "availableIngredients": [
+                        {"name": "pasta", "estimatedQuantity": 200.0, "unit": "g", "urgency": None},
+                        {"name": "tomato", "estimatedQuantity": 2.0, "unit": "pieces", "urgency": 1},
+                    ],
+                }},
+                headers=auth_headers,
+                timeout=30,  # intentionally short — we don't need it to finish
+            )
+        except requests.exceptions.Timeout:
+            pass  # expected — we interrupted the first pipeline on purpose
+
+        # Second pipeline — must not be starved by leftover tasks from the first
+        start = time.time()
+        response = requests.post(
+            f"{api_base}/recommend",
+            json={"userId": user_id, "sessionContext": {
+                "mealType": "dinner",
+                "availableTimeMinutes": 30,
+                "servingCount": 2,
+                "occasion": "",
+                "availableIngredients": [
+                    {"name": "chicken breast", "estimatedQuantity": 2.0, "unit": "pieces", "urgency": None},
+                    {"name": "rice", "estimatedQuantity": 1.0, "unit": "cups", "urgency": None},
+                ],
+            }},
+            headers=auth_headers,
+            timeout=self.RESTART_TIMEOUT_SECONDS,
+        )
+        elapsed = time.time() - start
+
+        assert response.status_code == 200, (
+            f"Second pipeline failed with {response.status_code} after {elapsed:.0f}s — "
+            f"likely stale background tasks from first session blocked Ollama. "
+            f"Response: {response.text[:300]}"
+        )
+        assert elapsed < self.RESTART_TIMEOUT_SECONDS, (
+            f"Second pipeline took {elapsed:.0f}s — exceeded {self.RESTART_TIMEOUT_SECONDS}s limit. "
+            "Background tasks from the previous session were not cancelled."
+        )
+        data = response.json()
+        assert data.get("sessionPoolId"), "Second pipeline response missing sessionPoolId"
+        assert len(data.get("recipes", [])) >= 1, "Second pipeline returned no recipes"
+
+    def test_new_pipeline_after_error_does_not_flood_llm(
+        self, api_base, registered_user, auth_headers
+    ):
+        """
+        If a prior pipeline was running when the user restarts, the next valid
+        pipeline must still complete cleanly without inheriting queued LLM calls.
+        Regression guard: ensures _cancel_user_bg_tasks() runs even after errors.
+        """
+        import time
+        user_id, _ = registered_user
+
+        # Kick off a pipeline and let it start background tasks, but don't wait
+        try:
+            requests.post(
+                f"{api_base}/recommend",
+                json={"userId": user_id, "sessionContext": {
+                    "mealType": "lunch",
+                    "availableTimeMinutes": 45,
+                    "servingCount": 2,
+                    "occasion": "",
+                    "availableIngredients": [
+                        {"name": "eggs", "estimatedQuantity": 3.0, "unit": "pieces", "urgency": 2},
+                    ],
+                }},
+                headers=auth_headers,
+                timeout=5,  # cut it off almost immediately
+            )
+        except requests.exceptions.Timeout:
+            pass
+
+        # The follow-up pipeline must complete cleanly
+        start = time.time()
+        response = requests.post(
+            f"{api_base}/recommend",
+            json={"userId": user_id, "sessionContext": {
+                "mealType": "breakfast",
+                "availableTimeMinutes": 20,
+                "servingCount": 1,
+                "occasion": "",
+                "availableIngredients": [
+                    {"name": "eggs", "estimatedQuantity": 3.0, "unit": "pieces", "urgency": 2},
+                    {"name": "bread", "estimatedQuantity": 2.0, "unit": "slices", "urgency": 3},
+                ],
+            }},
+            headers=auth_headers,
+            timeout=self.RESTART_TIMEOUT_SECONDS,
+        )
+        elapsed = time.time() - start
+
+        assert response.status_code == 200, (
+            f"Pipeline after interruption returned {response.status_code} in {elapsed:.0f}s: "
+            f"{response.text[:300]}"
+        )
+        data = response.json()
+        assert data.get("sessionPoolId"), "Pipeline-after-interruption response missing sessionPoolId"
