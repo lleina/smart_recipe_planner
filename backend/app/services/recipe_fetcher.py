@@ -41,9 +41,9 @@ logger = logging.getLogger("app.recipe_fetcher")
 # Concurrency limits
 # ---------------------------------------------------------------------------
 # Search: keep low to avoid DDG rate-limiting (5 concurrent searches max)
-_SEARCH_SEM = asyncio.Semaphore(5)
+_SEARCH_SEM = asyncio.Semaphore(8)
 # Scrape: HTTP I/O bound — more parallelism is fine
-_SCRAPE_SEM = asyncio.Semaphore(10)
+_SCRAPE_SEM = asyncio.Semaphore(15)
 
 # Thread pool for running the synchronous ddgs client
 _THREAD_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ddg")
@@ -733,11 +733,16 @@ async def _resolve_suggestion(
     seen_ids: set[str],
     seen_lock: asyncio.Lock,
     stagger_delay: float = 0.0,
+    exclude_ids: set[str] | None = None,
 ) -> Optional[tuple[str, dict]]:
     """
     Resolve one LLM suggestion to a recipe dict.
     Uses pre-loaded cache_hits (no DB session needed — safe for concurrent use).
     Returns ("cache"|"web", recipe_dict) or None on failure.
+
+    If ``exclude_ids`` is provided, cache hits whose ID is in the set are
+    skipped (forces a web search fallback) so background fetches don't
+    re-resolve recipes that are already in the session pool.
     """
     name = suggestion.get("name", "")
     if not name:
@@ -750,14 +755,19 @@ async def _resolve_suggestion(
     # Step 1: check pre-loaded cache
     cached = cache_hits.get(name)
     if cached:
-        async with seen_lock:
-            if cached["id"] in seen_ids:
-                logger.debug("Duplicate cache hit for '%s' — skipping", name)
-                return None
-            seen_ids.add(cached["id"])
-        cached["meal_type"] = [ctx.meal_type]
-        # Trust cached times from the original scrape — do NOT override with LLM estimate
-        return ("cache", cached)
+        # Skip cache hit if it's already known to the caller (e.g. already
+        # in the session pool) — fall through to web search instead.
+        if exclude_ids and cached["id"] in exclude_ids:
+            logger.debug("Cache hit for '%s' already in pool (id=%s) — trying web instead", name, cached["id"][:8])
+        else:
+            async with seen_lock:
+                if cached["id"] in seen_ids:
+                    logger.debug("Duplicate cache hit for '%s' — skipping", name)
+                    return None
+                seen_ids.add(cached["id"])
+            cached["meal_type"] = [ctx.meal_type]
+            # Trust cached times from the original scrape — do NOT override with LLM estimate
+            return ("cache", cached)
 
     # Step 2: web search + scrape (try multiple URLs on failure)
     urls = await _search_recipe_urls(name, max_urls=3)
@@ -796,6 +806,7 @@ async def fetch_recipes_batch(
     ctx: SessionContextRequest,
     db: AsyncSession,
     progress_cb=None,
+    exclude_ids: set[str] | None = None,
 ) -> list[dict]:
     """
     Stage 3 entry point. Resolves all LLM suggestions concurrently.
@@ -806,6 +817,10 @@ async def fetch_recipes_batch(
 
     progress_cb(done: int, total: int) is called after each suggestion resolves
     so the caller can track real-time fetch progress.
+
+    If ``exclude_ids`` is provided, cache hits matching those IDs are skipped
+    (the resolver falls through to web search). This prevents background
+    fetches from re-resolving recipes already in the session pool.
     """
     seen_ids: set[str] = set()
     seen_lock = asyncio.Lock()
@@ -832,7 +847,8 @@ async def fetch_recipes_batch(
 
     tasks = [
         _with_progress(_resolve_suggestion(s, ctx, cache_hits, seen_ids, seen_lock,
-                                           stagger_delay=i * 0.15))
+                                           stagger_delay=i * 0.08,
+                                           exclude_ids=exclude_ids))
         for i, s in enumerate(suggestions)
     ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)

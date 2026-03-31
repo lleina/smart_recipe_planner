@@ -130,7 +130,7 @@ def _fix_truncated_json_array(raw_json: str) -> str:
 
 
 # Number of recipe suggestions to generate per LLM ideation call.
-_IDEATION_COUNT = 25
+_IDEATION_COUNT = 80
 # Maximum attempts to call the LLM before falling back to the keyword list.
 _MAX_LLM_RETRIES = 3
 

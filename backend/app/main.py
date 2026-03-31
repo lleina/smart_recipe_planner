@@ -16,9 +16,12 @@ Startup sequence:
 """
 
 import logging
+import os
 import time
 import traceback
 from contextlib import asynccontextmanager
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 import httpx
 from fastapi import FastAPI, Request
@@ -47,13 +50,32 @@ from app.routes import (
 
 # ---------------------------------------------------------------------------
 # Structured logging — format is consistent across all app.* loggers.
+# Per-restart log file in backend/logs/ for debugging pipeline flow.
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)-22s | %(message)s",
+_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_FILE = os.path.join(_LOG_DIR, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+_fmt = logging.Formatter(
+    "%(asctime)s | %(levelname)-7s | %(name)-22s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# Console handler
+_console = logging.StreamHandler()
+_console.setFormatter(_fmt)
+_console.setLevel(logging.INFO)
+
+# File handler — one file per restart, capped at 20 MB
+_file = RotatingFileHandler(_LOG_FILE, maxBytes=20_000_000, backupCount=1)
+_file.setFormatter(_fmt)
+_file.setLevel(logging.DEBUG)  # capture DEBUG in file for detailed tracing
+
+logging.basicConfig(level=logging.DEBUG, handlers=[_console, _file])
 logger = logging.getLogger("app")
+logger.info("=" * 70)
+logger.info("NEW APP SESSION — log file: %s", _LOG_FILE)
+logger.info("=" * 70)
 
 
 @asynccontextmanager
