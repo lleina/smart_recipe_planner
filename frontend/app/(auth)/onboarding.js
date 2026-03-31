@@ -3,10 +3,14 @@
  * Captures: cuisines, diet, intolerances, health goal, time preference,
  * equipment, meal prep, perishable optimization.
  * Completable in under 1 minute (BR-ONB-07).
+ *
+ * Equipment step intentionally shows only the ~10 appliances that cover the
+ * overwhelming majority of recipes — prevents decision fatigue on first launch.
+ * Users can update equipment at any time from their profile settings.
  */
 
 import { useState, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput, FlatList } from 'react-native';
+import { View, Text, ScrollView, Pressable, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -21,10 +25,28 @@ import {
   INTOLERANCES,
   HEALTH_GOALS,
   TIME_PREFERENCES,
-  COOKING_EQUIPMENT,
 } from '../../src/constants/dietaryOptions';
 
 const TOTAL_STEPS = 4;
+
+/**
+ * Curated shortlist of cooking equipment shown during onboarding.
+ * Limited to the appliances that unlock the widest range of recipes.
+ * The full COOKING_EQUIPMENT list is available in profile settings for
+ * users who want to fine-tune further.
+ */
+const ONBOARDING_EQUIPMENT = [
+  { id: 'stove', label: 'Stove' },
+  { id: 'oven', label: 'Oven' },
+  { id: 'microwave', label: 'Microwave' },
+  { id: 'frying pan', label: 'Frying Pan' },
+  { id: 'pot', label: 'Pot' },
+  { id: 'blender', label: 'Blender' },
+  { id: 'airfryer', label: 'Air Fryer' },
+  { id: 'instant pot', label: 'Instant Pot' },
+  { id: 'slow cooker', label: 'Slow Cooker' },
+  { id: 'grill', label: 'Grill' },
+];
 
 const DEFAULT_PREFERENCES = {
   cuisinePreferences: [],
@@ -306,40 +328,37 @@ function GoalsStep({ preferences, onSetValue }) {
   );
 }
 
+/**
+ * Equipment step — shows only the most impactful kitchen appliances to
+ * minimise decision fatigue. Tap-to-select, no search required.
+ * @param {object} props
+ * @param {object} props.preferences - Current preference state.
+ * @param {function} props.onToggle - Toggle an array item in preferences.
+ * @param {function} props.onSetValue - Set a single preference value.
+ */
 function EquipmentStep({ preferences, onToggle, onSetValue }) {
-  const [equipQuery, setEquipQuery] = useState('');
-
-  const filteredEquipment = COOKING_EQUIPMENT.filter((item) =>
-    item.label.toLowerCase().includes(equipQuery.toLowerCase())
-  );
-
   return (
     <View className="py-4">
       <Text className="text-2xl font-bold text-text-primary mb-2">
         Your kitchen setup
       </Text>
-      <Text className="text-base text-text-secondary mb-4">
-        Optional. Helps us suggest recipes you can actually make.
+      <Text className="text-base text-text-secondary mb-1">
+        Which of these do you have? We'll only suggest recipes you can actually make.
+      </Text>
+      <Text className="text-xs text-text-muted mb-5">
+        You can add more equipment anytime from your profile.
       </Text>
 
-      <Text className="text-base font-semibold text-text-primary mb-2">
-        Equipment
+      <Text className="text-base font-semibold text-text-primary mb-3">
+        Appliances
         {preferences.cookingEquipment.length > 0 && (
           <Text className="text-sm font-normal text-text-muted">
             {' '}— {preferences.cookingEquipment.length} selected
           </Text>
         )}
       </Text>
-      <TextInput
-        className="border border-border rounded-xl px-4 py-2 mb-3 text-text-primary bg-surface"
-        placeholder="Search equipment…"
-        placeholderTextColor="#9CA3AF"
-        value={equipQuery}
-        onChangeText={setEquipQuery}
-        clearButtonMode="while-editing"
-      />
       <View className="flex-row flex-wrap mb-6">
-        {filteredEquipment.map((item) => (
+        {ONBOARDING_EQUIPMENT.map((item) => (
           <Tag
             key={item.id}
             label={item.label}
@@ -347,9 +366,6 @@ function EquipmentStep({ preferences, onToggle, onSetValue }) {
             onPress={() => onToggle('cookingEquipment', item.id)}
           />
         ))}
-        {filteredEquipment.length === 0 && (
-          <Text className="text-text-muted text-sm">No matching equipment</Text>
-        )}
       </View>
 
       <Pressable

@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { View, Text, ScrollView, Pressable, Image, TextInput, Modal, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Pressable, Image, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -237,9 +237,6 @@ export default function RecipeDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [servings, setServings] = useState(null);
   const [cooked, setCooked] = useState(false);
-  const [showReview, setShowReview] = useState(false);
-  const [rating, setRating] = useState(0);
-  const [reviewNote, setReviewNote] = useState('');
   const [imageError, setImageError] = useState(false);
 
   // LLM substitution results: maps ingredient name → {have, substitution}
@@ -345,7 +342,8 @@ export default function RecipeDetailScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setCooked(true);
     if (user?.id) await addEntry(id, session.mealType, servings, session.sessionPoolId);
-    setTimeout(() => setShowReview(true), 500);
+    // No immediate review prompt — people don't cook that fast.
+    // The History tab lets them rate and add notes whenever they're ready.
   };
 
   const handleSaveToggle = async () => {
@@ -356,17 +354,6 @@ export default function RecipeDetailScreen() {
     } else {
       await save(id, session.sessionPoolId);
     }
-  };
-
-  const handleSubmitReview = async () => {
-    if (user?.id && rating > 0) {
-      await trackEvent({
-        userId: user.id, sessionId: session.sessionPoolId, recipeId: id,
-        eventType: 'recipe_reviewed', metadata: { rating, note: reviewNote },
-      }).catch(() => {});
-    }
-    setShowReview(false);
-    router.back();
   };
 
   const saved = isSaved(id);
@@ -707,9 +694,14 @@ export default function RecipeDetailScreen() {
       {/* Action buttons */}
       <View className="px-6 pb-6 gap-3 border-t border-border pt-4 bg-background">
         {cooked ? (
-          <View className="py-4 rounded-xl bg-green-50 border border-green-200 items-center flex-row justify-center gap-2">
-            <Ionicons name="checkmark-circle" size={20} color="#16A34A" />
-            <Text className="text-green-700 font-semibold">Added to your history!</Text>
+          <View className="py-4 rounded-xl bg-green-50 border border-green-200 px-4">
+            <View className="flex-row items-center gap-2 mb-1">
+              <Ionicons name="checkmark-circle" size={20} color="#16A34A" />
+              <Text className="text-green-700 font-semibold">Added to cooking history!</Text>
+            </View>
+            <Text className="text-xs text-green-600 ml-7">
+              Head to the History tab whenever you're done to rate it and add notes.
+            </Text>
           </View>
         ) : (
           <Pressable
@@ -733,35 +725,6 @@ export default function RecipeDetailScreen() {
           </Text>
         </Pressable>
       </View>
-
-      {/* Post-cook review modal */}
-      <Modal visible={showReview} transparent animationType="fade" onRequestClose={() => setShowReview(false)}>
-        <View className="flex-1 bg-black/50 justify-end">
-          <View className="bg-background rounded-t-3xl p-6">
-            <Text className="text-xl font-bold text-text-primary mb-1">How did it go?</Text>
-            <Text className="text-sm text-text-secondary mb-4">Rate this recipe to improve future recommendations.</Text>
-            <View className="flex-row justify-center gap-3 mb-4">
-              {[1, 2, 3, 4, 5].map((star) => (
-                <Pressable key={star} onPress={() => setRating(star)} accessibilityLabel={star + ' stars'}>
-                  <Ionicons name={star <= rating ? 'star' : 'star-outline'} size={36} color={star <= rating ? '#F59E0B' : '#CBD5E1'} />
-                </Pressable>
-              ))}
-            </View>
-            <TextInput
-              value={reviewNote}
-              onChangeText={setReviewNote}
-              placeholder="Optional note (e.g. too salty, kids loved it)"
-              placeholderTextColor="#94A3B8"
-              className="border border-border rounded-xl px-4 py-3 text-sm text-text-primary mb-4 bg-surface"
-              multiline
-              maxLength={200}
-            />
-            <Pressable onPress={handleSubmitReview} className="bg-primary py-4 rounded-xl items-center">
-              <Text className="text-white font-semibold">{rating > 0 ? 'Submit Rating' : 'Skip'}</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }

@@ -6,10 +6,18 @@
  *
  * Substitutions are pre-fetched as each card is rendered so recipe detail
  * reads from cache with zero LLM wait.
+ *
+ * UX notes:
+ *   - Clicking "Next" never replaces the visible page with a full-screen
+ *     loader. The current page stays visible while the next batch loads,
+ *     with a phase progress banner shown at the top.
+ *   - The list auto-scrolls to the top whenever the page advances.
+ *   - Phase labels ("Brainstorming…", "Searching…", "Ranking…") give the
+ *     user a sense of what the system is doing without exposing internals.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, Pressable, ActivityIndicator, FlatList, ScrollView } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, Pressable, ActivityIndicator, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,6 +29,17 @@ import RecipeCard from '../../src/components/common/RecipeCard';
 import { RECIPE_BATCH_SIZE } from '../../src/constants/config';
 
 const FATIGUE_THRESHOLD = 7;
+
+/**
+ * Phase labels shown in the progress banner while the next page is loading.
+ * They cycle every 1.5 s to convey meaningful progression rather than a
+ * generic spinner — mirrors the actual backend pipeline stages.
+ */
+const DISCOVERY_PHASES = [
+  'Brainstorming ideas for your next page…',
+  'Searching for matching recipes…',
+  'Ranking by what you have on hand…',
+];
 
 export default function DiscoverScreen() {
   const router = useRouter();
@@ -47,6 +66,31 @@ export default function DiscoverScreen() {
 
   const [refreshCount, setRefreshCount] = useState(0);
   const [showFatiguePrompt, setShowFatiguePrompt] = useState(false);
+
+  // Ref for programmatic scroll-to-top on page advance
+  const flatListRef = useRef(null);
+
+  // Cycling phase index — only advances while nextPagePending is true
+  const [phaseIndex, setPhaseIndex] = useState(0);
+
+  useEffect(() => {
+    if (!nextPagePending) {
+      setPhaseIndex(0);
+      return;
+    }
+    const intervalId = setInterval(() => {
+      setPhaseIndex((prev) => (prev + 1) % DISCOVERY_PHASES.length);
+    }, 1500);
+    return () => clearInterval(intervalId);
+  }, [nextPagePending]);
+
+  // Scroll to top whenever the visible page changes (covers both instant
+  // and delayed advances).
+  useEffect(() => {
+    if (currentPage > 0) {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }
+  }, [currentPage]);
 
   // ── Handlers ────────────────────────────────────────────────────────────
 
@@ -93,22 +137,18 @@ export default function DiscoverScreen() {
 
   const hasActiveSession = session.sessionPoolId != null || recipes.length > 0 || loading;
 
-  // Determine whether to show REAL cards or a full-page loading indicator.
-  // NEVER show skeleton cards — the user either sees 5 real cards or a loading page.
-  const isPageLoading = useMemo(() => {
-    // Initial load: no recipes at all yet
-    if (loading && recipes.length === 0) return true;
-    // Waiting for the next page to fill
-    if (nextPagePending) return true;
-    // Current page doesn't have a full set of RECIPE_BATCH_SIZE cards and data is still arriving
-    if (currentPageRecipes.length < RECIPE_BATCH_SIZE && (isBuffering || poolInfo.poolSize > recipes.length)) return true;
-    return false;
-  }, [loading, recipes.length, nextPagePending, currentPageRecipes, isBuffering, poolInfo.poolSize]);
+  // Only show the full-page loader on the very first load when no recipes
+  // exist yet. Once the user has seen at least one page, keep showing it
+  // while the next page loads — a phase banner handles that state instead.
+  const isInitialLoading = (loading && recipes.length === 0) ||
+    (currentPageRecipes.length < RECIPE_BATCH_SIZE &&
+      recipes.length === 0 &&
+      (isBuffering || poolInfo.poolSize > 0));
 
   const listData = useMemo(() => {
-    if (isPageLoading) return [];  // empty — full-page loader shown instead
+    if (isInitialLoading) return [];
     return currentPageRecipes;
-  }, [isPageLoading, currentPageRecipes]);
+  }, [isInitialLoading, currentPageRecipes]);
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -122,6 +162,25 @@ export default function DiscoverScreen() {
       />
     );
   }, [isSaved, handlePress, handleSave]);
+
+  // ── Phase progress banner ────────────────────────────────────────────────
+
+  /**
+   * Shown at the top of the list while the next page is buffering.
+   * Keeps the current page fully visible so the user has something to look at.
+   */
+  const NextPageBanner = useMemo(() => {
+    if (!nextPagePending) return null;
+    return (
+      <View className="mb-4 px-4 py-3 bg-blue-50 border border-blue-100 rounded-2xl flex-row items-center gap-3">
+        <ActivityIndicator size="small" color="#2563EB" />
+        <View className="flex-1">
+          <Text className="text-xs font-semibold text-primary">Loading your next page</Text>
+          <Text className="text-xs text-blue-500 mt-0.5">{DISCOVERY_PHASES[phaseIndex]}</Text>
+        </View>
+      </View>
+    );
+  }, [nextPagePending, phaseIndex]);
 
   // ── Pagination controls ─────────────────────────────────────────────────
 
@@ -230,7 +289,7 @@ export default function DiscoverScreen() {
 
       {!hasActiveSession && !loading ? (
         <EmptyState onStart={handleStartSession} />
-      ) : isPageLoading && hasActiveSession ? (
+      ) : isInitialLoading && hasActiveSession ? (
         <View className="flex-1 items-center justify-center">
           <ActivityIndicator size="large" color="#2563EB" />
           <Text className="text-sm text-text-secondary mt-3 font-medium">
@@ -239,11 +298,14 @@ export default function DiscoverScreen() {
         </View>
       ) : (
         <FlatList
+          ref={flatListRef}
           data={listData}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           ListHeaderComponent={
             <>
+              {/* Phase banner: visible while next page is loading */}
+              {NextPageBanner}
               {llmWarning ? (
                 <View className="mb-2 py-3 bg-amber-50 border border-amber-200 rounded-xl flex-row items-center gap-2 px-4">
                   <Ionicons name="information-circle-outline" size={16} color="#D97706" />
