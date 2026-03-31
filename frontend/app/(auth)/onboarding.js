@@ -4,21 +4,26 @@
  * equipment, meal prep, perishable optimization.
  * Completable in under 1 minute (BR-ONB-07).
  *
- * Equipment step intentionally shows only the ~10 appliances that cover the
- * overwhelming majority of recipes — prevents decision fatigue on first launch.
- * Users can update equipment at any time from their profile settings.
+ * Design:
+ *   - Full-width progress track (StepIndicator) + step name at the top.
+ *   - Fixed title/subtitle header below the track — always visible.
+ *   - Scrollable list of full-width OptionRow cards for every choice.
+ *   - Single Continue/Start button pinned to the bottom.
+ *
+ * Equipment step intentionally shows only ~10 appliances to avoid
+ * decision fatigue. Users can add more from profile settings later.
  */
 
 import { useState, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput } from 'react-native';
+import { View, Text, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../src/context/AuthContext';
 import { updatePreferences } from '../../src/services/userService';
 import StepIndicator from '../../src/components/common/StepIndicator';
 import Button from '../../src/components/common/Button';
-import Tag from '../../src/components/common/Tag';
 import {
   CUISINE_OPTIONS,
   SPOONACULAR_DIETS,
@@ -27,26 +32,114 @@ import {
   TIME_PREFERENCES,
 } from '../../src/constants/dietaryOptions';
 
+// ---------------------------------------------------------------------------
+// Step metadata
+// ---------------------------------------------------------------------------
+
 const TOTAL_STEPS = 4;
 
-/**
- * Curated shortlist of cooking equipment shown during onboarding.
- * Limited to the appliances that unlock the widest range of recipes.
- * The full COOKING_EQUIPMENT list is available in profile settings for
- * users who want to fine-tune further.
- */
-const ONBOARDING_EQUIPMENT = [
-  { id: 'stove', label: 'Stove' },
-  { id: 'oven', label: 'Oven' },
-  { id: 'microwave', label: 'Microwave' },
-  { id: 'frying pan', label: 'Frying Pan' },
-  { id: 'pot', label: 'Pot' },
-  { id: 'blender', label: 'Blender' },
-  { id: 'airfryer', label: 'Air Fryer' },
-  { id: 'instant pot', label: 'Instant Pot' },
-  { id: 'slow cooker', label: 'Slow Cooker' },
-  { id: 'grill', label: 'Grill' },
+const STEP_LABELS = ['Cuisines', 'Dietary', 'Style', 'Kitchen'];
+
+const STEP_TITLES = [
+  'What cuisines do you love?',
+  'Any dietary preferences?',
+  'Your cooking style',
+  'Your kitchen setup',
 ];
+
+const STEP_SUBTITLES = [
+  'Pick your favorites — we personalize every suggestion around you.',
+  "We'll make sure every suggestion fits your needs.",
+  'Help us match recipes to your lifestyle.',
+  "We'll only suggest recipes you can actually make.",
+];
+
+// ---------------------------------------------------------------------------
+// Icon + colour metadata for each selectable option
+// ---------------------------------------------------------------------------
+
+/** Accent icon and colour for each cuisine. */
+const CUISINE_META = {
+  italian:          { icon: 'pizza-outline',              color: '#EF4444' },
+  mexican:          { icon: 'flame-outline',              color: '#F97316' },
+  chinese:          { icon: 'restaurant-outline',         color: '#EAB308' },
+  japanese:         { icon: 'fish-outline',               color: '#3B82F6' },
+  indian:           { icon: 'leaf-outline',               color: '#F59E0B' },
+  thai:             { icon: 'sunny-outline',              color: '#10B981' },
+  mediterranean:    { icon: 'boat-outline',               color: '#06B6D4' },
+  korean:           { icon: 'star-outline',               color: '#8B5CF6' },
+  american:         { icon: 'home-outline',               color: '#3B82F6' },
+  french:           { icon: 'heart-outline',              color: '#EC4899' },
+  'middle eastern': { icon: 'moon-outline',               color: '#F59E0B' },
+  vietnamese:       { icon: 'leaf-outline',               color: '#10B981' },
+  greek:            { icon: 'water-outline',              color: '#06B6D4' },
+  caribbean:        { icon: 'sunny-outline',              color: '#F97316' },
+  african:          { icon: 'earth-outline',              color: '#EF4444' },
+};
+
+/** Accent icon and colour for each diet type. */
+const DIET_META = {
+  'gluten free':      { icon: 'close-circle-outline',      color: '#F59E0B' },
+  ketogenic:          { icon: 'flame-outline',              color: '#EF4444' },
+  'lacto-vegetarian': { icon: 'leaf-outline',               color: '#10B981' },
+  'low fodmap':       { icon: 'medkit-outline',             color: '#3B82F6' },
+  'ovo-vegetarian':   { icon: 'ellipse-outline',            color: '#F59E0B' },
+  paleo:              { icon: 'barbell-outline',            color: '#F97316' },
+  pescetarian:        { icon: 'fish-outline',               color: '#06B6D4' },
+  primal:             { icon: 'leaf-outline',               color: '#78716C' },
+  vegan:              { icon: 'leaf-outline',               color: '#10B981' },
+  vegetarian:         { icon: 'leaf-outline',               color: '#22C55E' },
+  whole30:            { icon: 'checkmark-circle-outline',   color: '#8B5CF6' },
+};
+
+/** Accent icon and colour for each intolerance. */
+const INTOLERANCE_META = {
+  dairy:       { icon: 'water-outline',     color: '#3B82F6' },
+  egg:         { icon: 'ellipse-outline',   color: '#F59E0B' },
+  gluten:      { icon: 'restaurant-outline',color: '#F59E0B' },
+  grain:       { icon: 'restaurant-outline',color: '#F97316' },
+  peanut:      { icon: 'ellipse-outline',   color: '#F97316' },
+  seafood:     { icon: 'fish-outline',      color: '#06B6D4' },
+  sesame:      { icon: 'ellipse-outline',   color: '#EAB308' },
+  shellfish:   { icon: 'fish-outline',      color: '#0EA5E9' },
+  soy:         { icon: 'leaf-outline',      color: '#10B981' },
+  sulfite:     { icon: 'wine-outline',      color: '#8B5CF6' },
+  'tree nut':  { icon: 'leaf-outline',      color: '#F97316' },
+  wheat:       { icon: 'restaurant-outline',color: '#F59E0B' },
+};
+
+/** Accent icon and colour for each health goal. */
+const HEALTH_GOAL_META = {
+  'weight-loss': { icon: 'arrow-down-circle-outline', color: '#10B981' },
+  'muscle-gain': { icon: 'barbell-outline',           color: '#3B82F6' },
+  maintenance:   { icon: 'person-outline',            color: '#64748B' },
+  none:          { icon: 'happy-outline',             color: '#F59E0B' },
+};
+
+/** Accent icon, colour, and sublabel for each time preference. */
+const TIME_PREF_META = {
+  quick:    { icon: 'flash-outline',  color: '#F97316', sublabel: 'Under 20 minutes' },
+  moderate: { icon: 'time-outline',   color: '#3B82F6', sublabel: '20–45 minutes'    },
+  extended: { icon: 'timer-outline',  color: '#8B5CF6', sublabel: '45+ minutes'      },
+};
+
+/** Curated appliances + their icons — covers 90% of everyday recipes. */
+const ONBOARDING_EQUIPMENT = [
+  { id: 'stove',        label: 'Stove',        icon: 'flame-outline',      color: '#EF4444' },
+  { id: 'oven',         label: 'Oven',         icon: 'cube-outline',        color: '#F97316' },
+  { id: 'microwave',    label: 'Microwave',    icon: 'cube-outline',        color: '#64748B' },
+  { id: 'frying pan',   label: 'Frying Pan',   icon: 'restaurant-outline', color: '#EF4444' },
+  { id: 'pot',          label: 'Pot',          icon: 'restaurant-outline', color: '#3B82F6' },
+  { id: 'blender',      label: 'Blender',      icon: 'options-outline',    color: '#8B5CF6' },
+  { id: 'airfryer',     label: 'Air Fryer',    icon: 'sunny-outline',      color: '#F97316' },
+  { id: 'instant pot',  label: 'Instant Pot',  icon: 'timer-outline',      color: '#3B82F6' },
+  { id: 'slow cooker',  label: 'Slow Cooker',  icon: 'time-outline',       color: '#F59E0B' },
+  { id: 'grill',        label: 'Grill',        icon: 'flame-outline',      color: '#DC2626' },
+];
+
+// ---------------------------------------------------------------------------
+// Default preference state
+// ---------------------------------------------------------------------------
 
 const DEFAULT_PREFERENCES = {
   cuisinePreferences: [],
@@ -61,12 +154,16 @@ const DEFAULT_PREFERENCES = {
   perishableOptimizationPreference: true,
 };
 
+// ---------------------------------------------------------------------------
+// Main screen
+// ---------------------------------------------------------------------------
+
 export default function OnboardingScreen() {
   const [step, setStep] = useState(0);
   const [preferences, setPreferences] = useState(DEFAULT_PREFERENCES);
   const [saving, setSaving] = useState(false);
   const router = useRouter();
-  const { completeOnboarding, user, ensureRegistered } = useAuth();
+  const { completeOnboarding, ensureRegistered } = useAuth();
 
   const toggleArrayItem = useCallback((key, itemId) => {
     setPreferences((prev) => {
@@ -93,18 +190,13 @@ export default function OnboardingScreen() {
   const handleFinish = async () => {
     setSaving(true);
     try {
-      // Save preferences locally first (so app works even if server sync fails)
       await AsyncStorage.setItem('@user_preferences', JSON.stringify(preferences));
-
-      // Ensure user is registered with the backend, then sync preferences so
-      // recipe recommendations actually use the cuisines/diet the user chose.
       await ensureRegistered();
       await updatePreferences(preferences);
-
       await completeOnboarding();
       router.replace('/(tabs)/discover');
     } catch {
-      // Sync failed — still complete onboarding so user isn't blocked
+      // Sync failed — still complete onboarding so the user isn't blocked
       await completeOnboarding();
       router.replace('/(tabs)/discover');
     } finally {
@@ -125,12 +217,7 @@ export default function OnboardingScreen() {
           />
         );
       case 2:
-        return (
-          <GoalsStep
-            preferences={preferences}
-            onSetValue={setSingleValue}
-          />
-        );
+        return <GoalsStep preferences={preferences} onSetValue={setSingleValue} />;
       case 3:
         return (
           <EquipmentStep
@@ -148,13 +235,30 @@ export default function OnboardingScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-background">
-      <StepIndicator totalSteps={TOTAL_STEPS} currentStep={step} />
+      {/* Full-width progress track with step number + label */}
+      <StepIndicator
+        totalSteps={TOTAL_STEPS}
+        currentStep={step}
+        label={STEP_LABELS[step]}
+      />
 
-      <ScrollView className="flex-1 px-6" showsVerticalScrollIndicator={false}>
+      {/* Fixed header — always visible above the scrollable list */}
+      <View className="px-6 pb-4">
+        <Text className="text-2xl font-bold text-text-primary">{STEP_TITLES[step]}</Text>
+        <Text className="text-base text-text-secondary mt-1">{STEP_SUBTITLES[step]}</Text>
+      </View>
+
+      {/* Scrollable option list */}
+      <ScrollView
+        className="flex-1 px-6"
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 16 }}
+      >
         {renderStep()}
       </ScrollView>
 
-      <View className="px-6 pb-6 gap-3">
+      {/* Pinned action buttons */}
+      <View className="px-6 pb-6 gap-3 border-t border-border pt-4 bg-background">
         <Button
           title={isLastStep ? 'Start Cooking' : 'Continue'}
           onPress={isLastStep ? handleFinish : handleNext}
@@ -179,231 +283,232 @@ export default function OnboardingScreen() {
 
 function CuisineStep({ preferences, onToggle }) {
   return (
-    <View className="py-4">
-      <Text className="text-2xl font-bold text-text-primary mb-2">
-        What cuisines do you love?
-      </Text>
-      <Text className="text-base text-text-secondary mb-6">
-        Select all that apply. We will personalize your recipes.
-      </Text>
-      <View className="flex-row flex-wrap">
-        {CUISINE_OPTIONS.map((cuisine) => (
-          <Tag
+    <View>
+      {CUISINE_OPTIONS.map((cuisine) => {
+        const meta = CUISINE_META[cuisine.id] || { icon: 'restaurant-outline', color: '#64748B' };
+        return (
+          <OptionRow
             key={cuisine.id}
             label={cuisine.label}
+            iconName={meta.icon}
+            iconColor={meta.color}
             selected={preferences.cuisinePreferences.includes(cuisine.id)}
             onPress={() => onToggle('cuisinePreferences', cuisine.id)}
           />
-        ))}
-      </View>
+        );
+      })}
     </View>
   );
 }
 
 function DietaryStep({ preferences, onToggle, onSetValue }) {
-  const [dietQuery, setDietQuery] = useState('');
-  const [intoleranceQuery, setIntoleranceQuery] = useState('');
-
-  const filteredDiets = SPOONACULAR_DIETS.filter((d) =>
-    d.label.toLowerCase().includes(dietQuery.toLowerCase())
-  );
-  const filteredIntolerances = INTOLERANCES.filter((i) =>
-    i.label.toLowerCase().includes(intoleranceQuery.toLowerCase())
-  );
-
   return (
-    <View className="py-4">
-      <Text className="text-2xl font-bold text-text-primary mb-2">
-        Dietary preferences
-      </Text>
-      <Text className="text-base text-text-secondary mb-6">
-        We'll make sure every suggestion fits your needs.
-      </Text>
-
-      {/* --- Diet (single-select) --- */}
-      <Text className="text-base font-semibold text-text-primary mb-2">
-        Diet type
-        {preferences.diet ? (
-          <Text className="text-sm font-normal text-text-muted"> — {
-            SPOONACULAR_DIETS.find((d) => d.id === preferences.diet)?.label
-          }</Text>
-        ) : (
-          <Text className="text-sm font-normal text-text-muted"> — none selected</Text>
-        )}
-      </Text>
-      <TextInput
-        className="border border-border rounded-xl px-4 py-2 mb-3 text-text-primary bg-surface"
-        placeholder="Search diets…"
-        placeholderTextColor="#9CA3AF"
-        value={dietQuery}
-        onChangeText={setDietQuery}
-        clearButtonMode="while-editing"
-      />
-      <View className="flex-row flex-wrap mb-6">
-        {filteredDiets.map((item) => (
-          <Tag
-            key={item.id}
-            label={item.label}
-            selected={preferences.diet === item.id}
-            onPress={() =>
-              onSetValue('diet', preferences.diet === item.id ? null : item.id)
-            }
+    <View>
+      {/* ── Diet type (single-select) ── */}
+      <SectionHeader title="Diet type" />
+      {SPOONACULAR_DIETS.map((diet) => {
+        const meta = DIET_META[diet.id] || { icon: 'leaf-outline', color: '#64748B' };
+        return (
+          <OptionRow
+            key={diet.id}
+            label={diet.label}
+            iconName={meta.icon}
+            iconColor={meta.color}
+            selected={preferences.diet === diet.id}
+            onPress={() => onSetValue('diet', preferences.diet === diet.id ? null : diet.id)}
+            isRadio
           />
-        ))}
-        {filteredDiets.length === 0 && (
-          <Text className="text-text-muted text-sm">No matching diets</Text>
-        )}
-      </View>
+        );
+      })}
 
-      {/* --- Intolerances (multi-select) --- */}
-      <Text className="text-base font-semibold text-text-primary mb-2">
-        Intolerances / Allergies
-        {preferences.intolerances.length > 0 && (
-          <Text className="text-sm font-normal text-text-muted">
-            {' '}— {preferences.intolerances.length} selected
-          </Text>
-        )}
-      </Text>
-      <TextInput
-        className="border border-border rounded-xl px-4 py-2 mb-3 text-text-primary bg-surface"
-        placeholder="Search intolerances…"
-        placeholderTextColor="#9CA3AF"
-        value={intoleranceQuery}
-        onChangeText={setIntoleranceQuery}
-        clearButtonMode="while-editing"
-      />
-      <View className="flex-row flex-wrap">
-        {filteredIntolerances.map((item) => (
-          <Tag
+      {/* ── Intolerances / Allergies (multi-select) ── */}
+      <SectionHeader title="Intolerances & Allergies" />
+      {INTOLERANCES.map((item) => {
+        const meta = INTOLERANCE_META[item.id] || { icon: 'alert-circle-outline', color: '#F59E0B' };
+        return (
+          <OptionRow
             key={item.id}
             label={item.label}
+            iconName={meta.icon}
+            iconColor={meta.color}
             selected={preferences.intolerances.includes(item.id)}
             onPress={() => onToggle('intolerances', item.id)}
           />
-        ))}
-        {filteredIntolerances.length === 0 && (
-          <Text className="text-text-muted text-sm">No matching intolerances</Text>
-        )}
-      </View>
+        );
+      })}
     </View>
   );
 }
 
 function GoalsStep({ preferences, onSetValue }) {
   return (
-    <View className="py-4">
-      <Text className="text-2xl font-bold text-text-primary mb-2">
-        Your cooking style
-      </Text>
-      <Text className="text-base text-text-secondary mb-6">
-        Help us match recipes to your lifestyle.
-      </Text>
-
-      <Text className="text-base font-semibold text-text-primary mb-3">Health Goal</Text>
-      <View className="flex-row flex-wrap mb-6">
-        {HEALTH_GOALS.map((goal) => (
-          <Tag
+    <View>
+      {/* ── Health goal (single-select) ── */}
+      <SectionHeader title="Health goal" />
+      {HEALTH_GOALS.map((goal) => {
+        const meta = HEALTH_GOAL_META[goal.id] || { icon: 'heart-outline', color: '#64748B' };
+        return (
+          <OptionRow
             key={goal.id}
             label={goal.label}
+            iconName={meta.icon}
+            iconColor={meta.color}
             selected={preferences.healthGoal === goal.id}
             onPress={() => onSetValue('healthGoal', goal.id)}
+            isRadio
           />
-        ))}
-      </View>
+        );
+      })}
 
-      <Text className="text-base font-semibold text-text-primary mb-3">
-        Preferred Cooking Time
-      </Text>
-      <View className="flex-row flex-wrap">
-        {TIME_PREFERENCES.map((pref) => (
-          <Tag
+      {/* ── Preferred cooking time (single-select) ── */}
+      <SectionHeader title="Preferred cooking time" />
+      {TIME_PREFERENCES.map((pref) => {
+        const meta = TIME_PREF_META[pref.id] || { icon: 'time-outline', color: '#64748B', sublabel: '' };
+        return (
+          <OptionRow
             key={pref.id}
-            label={`${pref.label} (${pref.description})`}
+            label={pref.label}
+            sublabel={meta.sublabel}
+            iconName={meta.icon}
+            iconColor={meta.color}
             selected={preferences.timePreference === pref.id}
             onPress={() => onSetValue('timePreference', pref.id)}
+            isRadio
           />
-        ))}
-      </View>
+        );
+      })}
     </View>
   );
 }
 
 /**
- * Equipment step — shows only the most impactful kitchen appliances to
- * minimise decision fatigue. Tap-to-select, no search required.
- * @param {object} props
- * @param {object} props.preferences - Current preference state.
- * @param {function} props.onToggle - Toggle an array item in preferences.
- * @param {function} props.onSetValue - Set a single preference value.
+ * Equipment step — tap-to-select appliances + two preference toggles.
+ * @param {object}   props
+ * @param {object}   props.preferences
+ * @param {function} props.onToggle
+ * @param {function} props.onSetValue
  */
 function EquipmentStep({ preferences, onToggle, onSetValue }) {
   return (
-    <View className="py-4">
-      <Text className="text-2xl font-bold text-text-primary mb-2">
-        Your kitchen setup
-      </Text>
-      <Text className="text-base text-text-secondary mb-1">
-        Which of these do you have? We'll only suggest recipes you can actually make.
-      </Text>
-      <Text className="text-xs text-text-muted mb-5">
+    <View>
+      <Text className="text-xs text-text-muted mb-4">
         You can add more equipment anytime from your profile.
       </Text>
 
-      <Text className="text-base font-semibold text-text-primary mb-3">
-        Appliances
-        {preferences.cookingEquipment.length > 0 && (
-          <Text className="text-sm font-normal text-text-muted">
-            {' '}— {preferences.cookingEquipment.length} selected
-          </Text>
-        )}
-      </Text>
-      <View className="flex-row flex-wrap mb-6">
-        {ONBOARDING_EQUIPMENT.map((item) => (
-          <Tag
-            key={item.id}
-            label={item.label}
-            selected={preferences.cookingEquipment.includes(item.id)}
-            onPress={() => onToggle('cookingEquipment', item.id)}
-          />
-        ))}
+      {/* ── Appliances (multi-select) ── */}
+      {ONBOARDING_EQUIPMENT.map((item) => (
+        <OptionRow
+          key={item.id}
+          label={item.label}
+          iconName={item.icon}
+          iconColor={item.color}
+          selected={preferences.cookingEquipment.includes(item.id)}
+          onPress={() => onToggle('cookingEquipment', item.id)}
+        />
+      ))}
+
+      {/* ── Cooking habits (boolean toggles styled as option rows) ── */}
+      <SectionHeader title="Cooking habits" />
+
+      <OptionRow
+        label="Meal prep / batch cooking"
+        sublabel="I cook in bulk for the week"
+        iconName="layers-outline"
+        iconColor="#3B82F6"
+        selected={preferences.mealPrep}
+        onPress={() => onSetValue('mealPrep', !preferences.mealPrep)}
+      />
+
+      <OptionRow
+        label="Prioritize expiring ingredients"
+        sublabel="Show recipes that use what's about to expire first"
+        iconName="calendar-outline"
+        iconColor="#F59E0B"
+        selected={preferences.perishableOptimizationPreference}
+        onPress={() =>
+          onSetValue(
+            'perishableOptimizationPreference',
+            !preferences.perishableOptimizationPreference,
+          )
+        }
+      />
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared UI sub-components
+// ---------------------------------------------------------------------------
+
+/**
+ * Full-width selectable option card.
+ * Multi-select shows a square checkbox; single-select shows a radio circle.
+ *
+ * @param {object}   props
+ * @param {string}   props.label      - Primary label text.
+ * @param {string}   [props.sublabel] - Optional secondary description.
+ * @param {string}   props.iconName   - Ionicons icon name.
+ * @param {string}   props.iconColor  - Hex accent colour for icon + tinted bg.
+ * @param {boolean}  props.selected   - Whether this option is currently chosen.
+ * @param {function} props.onPress    - Called when the row is tapped.
+ * @param {boolean}  [props.isRadio]  - True for single-select (radio) behaviour.
+ */
+function OptionRow({ label, sublabel, iconName, iconColor, selected, onPress, isRadio = false }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      className={
+        'flex-row items-center p-4 rounded-2xl mb-3 border active:opacity-80 ' +
+        (selected ? 'bg-blue-50 border-primary' : 'bg-surface border-border')
+      }
+      accessibilityRole={isRadio ? 'radio' : 'checkbox'}
+      accessibilityState={{ checked: selected }}
+    >
+      {/* Tinted icon circle */}
+      <View
+        className="w-11 h-11 rounded-full items-center justify-center mr-4 flex-shrink-0"
+        style={{ backgroundColor: iconColor + '22' }}
+      >
+        <Ionicons name={iconName} size={20} color={iconColor} />
       </View>
 
-      <Pressable
-        onPress={() => onSetValue('mealPrep', !preferences.mealPrep)}
-        className="flex-row items-center justify-between py-4 border-t border-border"
-      >
-        <Text className="text-base text-text-primary">I do meal prep / batch cooking</Text>
-        <View
-          className={`w-6 h-6 rounded border-2 items-center justify-center ${
-            preferences.mealPrep ? 'bg-primary border-primary' : 'border-border'
-          }`}
-        >
-          {preferences.mealPrep && <Text className="text-white text-xs font-bold">✓</Text>}
-        </View>
-      </Pressable>
+      {/* Label + optional sublabel */}
+      <View className="flex-1 mr-3">
+        <Text className={'text-base font-medium ' + (selected ? 'text-primary' : 'text-text-primary')}>
+          {label}
+        </Text>
+        {sublabel ? (
+          <Text className="text-sm text-text-muted mt-0.5">{sublabel}</Text>
+        ) : null}
+      </View>
 
-      <Pressable
-        onPress={() =>
-          onSetValue('perishableOptimizationPreference', !preferences.perishableOptimizationPreference)
+      {/* Selection indicator: radio dot or square checkbox */}
+      <View
+        className={
+          'w-5 h-5 items-center justify-center border-2 flex-shrink-0 ' +
+          (isRadio ? 'rounded-full ' : 'rounded ') +
+          (selected ? 'bg-primary border-primary' : 'border-slate-300')
         }
-        className="flex-row items-center justify-between py-4 border-t border-border"
       >
-        <View className="flex-1 mr-4">
-          <Text className="text-base text-text-primary">Prioritize expiring ingredients</Text>
-          <Text className="text-sm text-text-muted">
-            Suggest recipes using ingredients about to expire first
-          </Text>
-        </View>
-        <View
-          className={`w-6 h-6 rounded border-2 items-center justify-center ${
-            preferences.perishableOptimizationPreference ? 'bg-primary border-primary' : 'border-border'
-          }`}
-        >
-          {preferences.perishableOptimizationPreference && (
-            <Text className="text-white text-xs font-bold">✓</Text>
-          )}
-        </View>
-      </Pressable>
-    </View>
+        {selected && (
+          isRadio
+            ? <View className="w-2 h-2 rounded-full bg-white" />
+            : <Ionicons name="checkmark" size={12} color="white" />
+        )}
+      </View>
+    </Pressable>
+  );
+}
+
+/**
+ * Subtle uppercase section header between groups of option rows.
+ * @param {object} props
+ * @param {string} props.title - Header text.
+ */
+function SectionHeader({ title }) {
+  return (
+    <Text className="text-xs font-semibold text-text-muted uppercase tracking-widest mb-3 mt-2">
+      {title}
+    </Text>
   );
 }
