@@ -459,7 +459,7 @@ function OptionRow({ label, sublabel, iconName, iconColor, selected, onPress, is
       onPress={onPress}
       className={
         'flex-row items-center p-4 rounded-2xl mb-3 border active:opacity-80 ' +
-        (selected ? 'bg-blue-50 border-primary' : 'bg-surface border-border')
+        (selected ? 'bg-green-50 border-primary' : 'bg-surface border-border')
       }
       accessibilityRole={isRadio ? 'radio' : 'checkbox'}
       accessibilityState={{ checked: selected }}

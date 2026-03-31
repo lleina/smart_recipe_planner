@@ -173,13 +173,13 @@ export default function GeneratingScreen() {
                   {/* Icon / indicator */}
                   <View className={'w-10 h-10 rounded-full items-center justify-center mr-4 ' + (
                     isDone   ? 'bg-green-100' :
-                    isActive ? 'bg-blue-100' :
+                    isActive ? 'bg-green-100' :
                                'bg-gray-100'
                   )}>
                     {isDone ? (
-                      <Ionicons name="checkmark" size={20} color="#16A34A" />
+                      <Ionicons name="checkmark" size={20} color="#214130" />
                     ) : isActive ? (
-                      <ActivityIndicator size="small" color="#2563EB" />
+                      <ActivityIndicator size="small" color="#214130" />
                     ) : (
                       <Ionicons name={s.icon} size={18} color="#CBD5E1" />
                     )}

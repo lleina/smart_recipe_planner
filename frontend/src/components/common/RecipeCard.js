@@ -149,7 +149,7 @@ function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }
           <Ionicons
             name={isSaved ? 'bookmark' : 'bookmark-outline'}
             size={18}
-            color={isSaved ? '#2563EB' : '#64748B'}
+            color={isSaved ? '#214130' : '#64748B'}
           />
         </Pressable>
 

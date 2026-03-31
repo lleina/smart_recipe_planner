@@ -10,6 +10,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useFonts, Mohave_700Bold, Mohave_400Regular } from '@expo-google-fonts/mohave';
 import { AuthProvider } from '../src/context/AuthContext';
 import { SessionProvider } from '../src/context/SessionContext';
 import { RecipeProvider } from '../src/context/RecipeContext';
@@ -19,9 +20,17 @@ import '../global.css';
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
+  // fontError lets the app proceed even if the font fails to download
+  // (e.g. no network on first launch) — system font is used as fallback.
+  const [fontsLoaded, fontError] = useFonts({ Mohave_700Bold, Mohave_400Regular });
+
   useEffect(() => {
-    SplashScreen.hideAsync();
-  }, []);
+    if (fontsLoaded || fontError) {
+      SplashScreen.hideAsync();
+    }
+  }, [fontsLoaded, fontError]);
+
+  if (!fontsLoaded && !fontError) return null;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

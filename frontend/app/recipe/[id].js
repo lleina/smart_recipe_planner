@@ -470,7 +470,7 @@ export default function RecipeDetailScreen() {
             className="absolute top-4 right-4 w-10 h-10 bg-white/90 rounded-full items-center justify-center"
             accessibilityLabel={saved ? 'Remove from saved' : 'Save recipe'}
           >
-            <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={20} color={saved ? '#2563EB' : '#1E293B'} />
+            <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={20} color={saved ? '#214130' : '#1E293B'} />
           </Pressable>
         </View>
 
@@ -490,7 +490,7 @@ export default function RecipeDetailScreen() {
           <View className="flex-row">
             {prepTime ? (
               <View className="flex-1 items-center py-3 border-r border-border">
-                <Ionicons name="time-outline" size={18} color="#2563EB" />
+                <Ionicons name="time-outline" size={18} color="#214130" />
                 <Text className="text-sm font-bold text-text-primary mt-1">{formatMinutes(prepTime)}</Text>
                 <Text className="text-xs text-text-muted">Prep</Text>
               </View>
@@ -504,7 +504,7 @@ export default function RecipeDetailScreen() {
             ) : null}
             {!prepTime && !cookTime ? (
               <View className="flex-1 items-center py-3 border-r border-border">
-                <Ionicons name="time-outline" size={18} color="#2563EB" />
+                <Ionicons name="time-outline" size={18} color="#214130" />
                 <Text className="text-sm font-bold text-text-primary mt-1">{formatMinutes(totalTime)}</Text>
                 <Text className="text-xs text-text-muted">Total</Text>
               </View>
@@ -576,7 +576,7 @@ export default function RecipeDetailScreen() {
                     {/* Status icon */}
                     <View className="w-6 items-center mr-2 flex-shrink-0">
                       {haveIt ? (
-                        <Ionicons name="checkmark-circle" size={18} color="#16A34A" />
+                        <Ionicons name="checkmark-circle" size={18} color="#214130" />
                       ) : substitution ? (
                         <Ionicons name="swap-horizontal" size={18} color="#D97706" />
                       ) : (
@@ -636,9 +636,9 @@ export default function RecipeDetailScreen() {
             {(recipe.instructions || []).length} steps
           </Text>
           {servings && recipe.servings && servings !== recipe.servings ? (
-            <View className="flex-row items-center gap-1 mb-3 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-              <Ionicons name="information-circle-outline" size={14} color="#2563EB" />
-              <Text className="text-xs text-blue-700">
+            <View className="flex-row items-center gap-1 mb-3 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+              <Ionicons name="information-circle-outline" size={14} color="#214130" />
+              <Text className="text-xs text-green-700">
                 Quantities in steps are written for {recipe.servings} servings — you scaled to {servings}.
                 Adjust measurements proportionally ({servings > recipe.servings ? '×' : '÷'}{Math.abs(Math.round((servings / recipe.servings) * 10) / 10)})
               </Text>
@@ -666,7 +666,7 @@ export default function RecipeDetailScreen() {
                     <Text className="text-sm text-text-primary leading-6">
                       {segments.map((seg, j) =>
                         seg.type === 'highlight' ? (
-                          <Text key={j} className="font-bold text-primary bg-blue-50 rounded">
+                          <Text key={j} className="font-bold text-primary bg-green-50 rounded">
                             {seg.value}
                           </Text>
                         ) : (
@@ -706,7 +706,7 @@ export default function RecipeDetailScreen() {
           <View className="rounded-xl bg-green-50 border border-green-200 px-4 py-3">
             <View className="flex-row items-center justify-between">
               <View className="flex-row items-center gap-2 flex-1">
-                <Ionicons name="checkmark-circle" size={20} color="#16A34A" />
+                <Ionicons name="checkmark-circle" size={20} color="#214130" />
                 <Text className="text-green-700 font-semibold">Added to cooking history!</Text>
               </View>
               <Pressable
@@ -714,7 +714,7 @@ export default function RecipeDetailScreen() {
                 hitSlop={12}
                 accessibilityLabel="Dismiss"
               >
-                <Ionicons name="close" size={18} color="#16A34A" />
+                <Ionicons name="close" size={18} color="#214130" />
               </Pressable>
             </View>
             <Text className="text-xs text-green-600 ml-7 mt-1">
@@ -734,10 +734,10 @@ export default function RecipeDetailScreen() {
         <Pressable
           onPress={handleSaveToggle}
           className={'py-4 rounded-xl items-center border flex-row justify-center gap-2 active:bg-gray-50 '
-            + (saved ? 'border-primary bg-blue-50' : 'border-border bg-surface')}
+            + (saved ? 'border-primary bg-green-50' : 'border-border bg-surface')}
           accessibilityRole="button"
         >
-          <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={18} color={saved ? '#2563EB' : '#64748B'} />
+          <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={18} color={saved ? '#214130' : '#64748B'} />
           <Text className={'text-base font-semibold ' + (saved ? 'text-primary' : 'text-text-primary')}>
             {saved ? 'Saved' : 'Save for Later'}
           </Text>

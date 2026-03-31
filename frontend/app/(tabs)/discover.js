@@ -17,7 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, Pressable, ActivityIndicator, FlatList } from 'react-native';
+import { View, Text, Pressable, ActivityIndicator, FlatList, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -172,11 +172,11 @@ export default function DiscoverScreen() {
   const NextPageBanner = useMemo(() => {
     if (!nextPagePending) return null;
     return (
-      <View className="mb-4 px-4 py-3 bg-blue-50 border border-blue-100 rounded-2xl flex-row items-center gap-3">
-        <ActivityIndicator size="small" color="#2563EB" />
+      <View className="mb-4 px-4 py-3 bg-green-50 border border-green-100 rounded-2xl flex-row items-center gap-3">
+        <ActivityIndicator size="small" color="#214130" />
         <View className="flex-1">
           <Text className="text-xs font-semibold text-primary">Loading your next page</Text>
-          <Text className="text-xs text-blue-500 mt-0.5">{DISCOVERY_PHASES[phaseIndex]}</Text>
+          <Text className="text-xs text-green-600 mt-0.5">{DISCOVERY_PHASES[phaseIndex]}</Text>
         </View>
       </View>
     );
@@ -216,7 +216,7 @@ export default function DiscoverScreen() {
             accessibilityRole="button"
             accessibilityLabel="Previous page"
           >
-            <Ionicons name="chevron-back" size={18} color={hasPrevPage ? '#2563EB' : '#94A3B8'} />
+            <Ionicons name="chevron-back" size={18} color={hasPrevPage ? '#214130' : '#94A3B8'} />
             <Text className={'text-sm font-semibold ' + (hasPrevPage ? 'text-primary' : 'text-text-muted')}>
               Prev
             </Text>
@@ -238,7 +238,7 @@ export default function DiscoverScreen() {
               (hasNextPage && !isLoadingNext
                 ? 'bg-primary active:opacity-80'
                 : isLoadingNext
-                  ? 'bg-blue-100 border border-blue-200'
+                  ? 'bg-green-100 border border-green-200'
                   : 'opacity-30 bg-surface border border-border')
             }
             accessibilityRole="button"
@@ -246,7 +246,7 @@ export default function DiscoverScreen() {
           >
             {isLoadingNext ? (
               <>
-                <ActivityIndicator size="small" color="#2563EB" />
+                <ActivityIndicator size="small" color="#214130" />
                 <Text className="text-sm font-semibold text-primary ml-1">Loading…</Text>
               </>
             ) : (
@@ -269,29 +269,38 @@ export default function DiscoverScreen() {
     handleNextPage, handlePrevPage,
   ]);
 
-  return (
-    <SafeAreaView className="flex-1 bg-background">
-      <View className="px-6 pt-4 pb-2 flex-row items-center justify-between">
-        <Text className="text-2xl font-bold text-text-primary">Discover</Text>
-        <View className="flex-row items-center gap-3">
-          {hasActiveSession ? (
-            <Pressable
-              onPress={handleStartSession}
-              className="flex-row items-center gap-1 px-3 py-1.5 rounded-full border border-border"
-              accessibilityLabel="Start new session"
-            >
-              <Ionicons name="refresh-outline" size={14} color="#64748B" />
-              <Text className="text-xs font-medium text-text-secondary">New</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      </View>
+  // Full green background when no active session (home/empty state).
+  const isEmptyState = !hasActiveSession && !loading;
 
-      {!hasActiveSession && !loading ? (
+  return (
+    <SafeAreaView
+      className="flex-1"
+      style={{ backgroundColor: isEmptyState ? '#214130' : '#FAFAFA' }}
+    >
+      {/* Header — hidden during the empty state so the green fills edge-to-edge */}
+      {!isEmptyState && (
+        <View className="px-6 pt-4 pb-2 flex-row items-center justify-between">
+          <Text className="text-2xl font-bold text-text-primary">Discover</Text>
+          <View className="flex-row items-center gap-3">
+            {hasActiveSession ? (
+              <Pressable
+                onPress={handleStartSession}
+                className="flex-row items-center gap-1 px-3 py-1.5 rounded-full border border-border"
+                accessibilityLabel="Start new session"
+              >
+                <Ionicons name="refresh-outline" size={14} color="#64748B" />
+                <Text className="text-xs font-medium text-text-secondary">New</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      {isEmptyState ? (
         <EmptyState onStart={handleStartSession} />
       ) : isInitialLoading && hasActiveSession ? (
         <View className="flex-1 items-center justify-center">
-          <ActivityIndicator size="large" color="#2563EB" />
+          <ActivityIndicator size="large" color="#214130" />
           <Text className="text-sm text-text-secondary mt-3 font-medium">
             Finding great recipes for you…
           </Text>
@@ -319,8 +328,8 @@ export default function DiscoverScreen() {
                 </View>
               ) : null}
               {session.sessionPoolId ? (
-                <View className="flex-row items-center gap-2 mb-4 py-2 px-3 bg-blue-50 rounded-xl">
-                  <Ionicons name="restaurant-outline" size={14} color="#2563EB" />
+                <View className="flex-row items-center gap-2 mb-4 py-2 px-3 bg-green-50 rounded-xl">
+                  <Ionicons name="restaurant-outline" size={14} color="#214130" />
                   <Text className="text-xs font-medium text-primary capitalize">
                     {session.mealType} · {session.servingCount} serving{session.servingCount !== 1 ? 's' : ''}
                     {session.occasion ? ' · ' + session.occasion : ''}
@@ -343,30 +352,63 @@ export default function DiscoverScreen() {
 }
 
 /**
- * Prompt shown when no active session exists yet.
+ * Full-screen dark-green home state shown when no active session exists yet.
+ * Bold Mohave display font headline, white CTA — no icon, pure typography.
+ *
+ * Layout: spacer fills the top ~45% so content naturally sits in the lower
+ * half; this guarantees the button is always visible regardless of device height.
+ *
  * @param {object} props
- * @param {function} props.onStart - Called when the user taps "Start Cooking Session".
+ * @param {function} props.onStart - Called when the user taps "Find Me Now".
  */
 function EmptyState({ onStart }) {
   return (
-    <View className="flex-1 items-center justify-center px-8">
-      <View className="w-24 h-24 rounded-full bg-blue-50 items-center justify-center mb-6">
-        <Ionicons name="restaurant-outline" size={48} color="#2563EB" />
-      </View>
-      <Text className="text-2xl font-bold text-text-primary mb-3 text-center">
-        What are you cooking today?
+    <ScrollView
+      contentContainerStyle={{
+        flexGrow: 1,
+        justifyContent: 'flex-end',
+        paddingHorizontal: 32,
+        paddingBottom: 52,
+      }}
+      scrollEnabled={false}
+      keyboardShouldPersistTaps="handled"
+    >
+      <Text
+        style={{
+          fontFamily: 'Mohave_700Bold',
+          fontSize: 50,
+          color: '#FFFFFF',
+          lineHeight: 56,
+          letterSpacing: -1,
+          marginBottom: 36,
+        }}
+        accessibilityRole="header"
+      >
+        The internet has millions of recipes.{'\n'}You only need one.{'\n'}We'll find it.
       </Text>
-      <Text className="text-base text-text-secondary text-center mb-8 leading-6">
-        Tell us what ingredients you have and we will find perfect recipes in seconds.
-      </Text>
+
       <Pressable
         onPress={onStart}
-        className="bg-primary py-4 px-8 rounded-xl w-full items-center active:opacity-90"
+        style={{
+          backgroundColor: '#FFFFFF',
+          paddingVertical: 18,
+          borderRadius: 16,
+          alignItems: 'center',
+        }}
         accessibilityRole="button"
-        accessibilityLabel="Start cooking session"
+        accessibilityLabel="Find me a recipe now"
       >
-        <Text className="text-white text-base font-semibold">Start Cooking Session</Text>
+        <Text
+          style={{
+            fontFamily: 'Mohave_700Bold',
+            color: '#214130',
+            fontSize: 18,
+            letterSpacing: 0.3,
+          }}
+        >
+          Find Me Now
+        </Text>
       </Pressable>
-    </View>
+    </ScrollView>
   );
 }

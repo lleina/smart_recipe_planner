@@ -208,7 +208,7 @@ export default function SessionSetupScreen() {
           {/* VLM loading state */}
           {vlm.loading ? (
             <View className="flex-row items-center gap-2 py-3">
-              <ActivityIndicator size="small" color="#2563EB" />
+              <ActivityIndicator size="small" color="#214130" />
               <Text className="text-sm text-text-secondary">Identifying ingredients…</Text>
             </View>
           ) : null}
@@ -364,7 +364,7 @@ export default function SessionSetupScreen() {
             <Ionicons
               name={showAdvancedTime ? 'chevron-up' : 'chevron-down'}
               size={16}
-              color="#2563EB"
+              color="#214130"
             />
           </Pressable>
 
@@ -450,7 +450,7 @@ export default function SessionSetupScreen() {
       style={[{ position: 'absolute', left: 0, top: 0, zIndex: 100 }, dragOverlayStyle]}
       pointerEvents="none"
     >
-      <View style={{ backgroundColor: '#2563EB', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 }}>
+      <View style={{ backgroundColor: '#214130', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 }}>
         <Text style={{ color: 'white', fontSize: 14, fontWeight: '500' }}>
           {draggingIngredient?.name ?? ''}
         </Text>
