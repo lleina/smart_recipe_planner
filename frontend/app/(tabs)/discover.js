@@ -309,6 +309,7 @@ export default function DiscoverScreen() {
         <FlatList
           ref={flatListRef}
           data={listData}
+          extraData={savedRecipes}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           ListHeaderComponent={
