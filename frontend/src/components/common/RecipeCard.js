@@ -24,38 +24,39 @@ const DIFFICULTY_LABELS = {
 
 /**
  * Compact ingredient-match indicator shown on each recipe card.
- * Green (≥80%), amber (≥60%), red (<60%).  Shows swap hint for the
- * first missing key ingredient when available.
+ *
+ * Thresholds are intentionally lenient — the goal is to show the user that
+ * they *can* make something close, not to discourage them with a red badge:
+ *   ≥70% → green  (they're basically set)
+ *   ≥40% → yellow (a few swaps and they're good)
+ *   <40%  → amber  (creative substitutions needed — still doable!)
+ *
+ * A substitution nudge is shown below the count whenever the match is not
+ * green, reminding the user that tapping the card surfaces swap ideas.
  */
 function IngredientMatchBadge({ recipe }) {
   const pct = recipe.ingredientMatchPct ?? 0;
   const matched = recipe.matchedIngredientCount ?? 0;
   const total = recipe.totalIngredientCount ?? 0;
   const swaps = recipe.swapSuggestions ?? [];
-  const missingKeys = recipe.missingKeyIngredients ?? [];
 
-  const isHigh = pct >= 80;
-  const isMid = pct >= 60 && pct < 80;
+  const isHigh = pct >= 70;
+  const isMid = pct >= 40 && pct < 70;
+  // isLow covers pct < 40 (encouraging amber, not alarming red)
 
-  const iconName = isHigh
-    ? 'checkmark-circle'
-    : isMid
-      ? 'alert-circle-outline'
-      : 'close-circle-outline';
-  const iconColor = isHigh ? '#10B981' : isMid ? '#F59E0B' : '#EF4444';
-  const labelColor = isHigh
-    ? 'text-emerald-600'
-    : isMid
-      ? 'text-amber-600'
-      : 'text-red-500';
+  const iconName = isHigh ? 'checkmark-circle' : 'alert-circle-outline';
+  const iconColor = isHigh ? '#10B981' : isMid ? '#CA8A04' : '#D97706';
+  const labelColor = isHigh ? 'text-emerald-600' : isMid ? 'text-yellow-600' : 'text-amber-600';
 
-  // Build swap hint text
+  // Hint text: show a specific swap when available; otherwise nudge to tap for ideas.
+  // We never show "Need: X" — that feels like a blocker. Instead, inspire creativity.
   let hint = null;
-  if (swaps.length > 0 && swaps[0].swap) {
-    hint = `${capitalize(swaps[0].ingredient)} → try ${swaps[0].swap}`;
-  } else if (missingKeys.length > 0) {
-    const names = missingKeys.slice(0, 2).map(capitalize).join(', ');
-    hint = `Need: ${names}`;
+  if (!isHigh) {
+    if (swaps.length > 0 && swaps[0].swap) {
+      hint = `${capitalize(swaps[0].ingredient)} → try ${swaps[0].swap}`;
+    } else {
+      hint = 'Tap to see substitution ideas';
+    }
   }
 
   return (
@@ -148,7 +149,7 @@ function RecipeCard({ recipe, isSaved, onPress, onSave, loading = false, badge }
           <Ionicons
             name={isSaved ? 'bookmark' : 'bookmark-outline'}
             size={18}
-            color={isSaved ? '#2563EB' : '#64748B'}
+            color={isSaved ? '#214130' : '#64748B'}
           />
         </Pressable>
 

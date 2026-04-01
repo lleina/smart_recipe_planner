@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { View, Text, ScrollView, Pressable, Image, TextInput, Modal, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Pressable, Image, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -237,10 +237,15 @@ export default function RecipeDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [servings, setServings] = useState(null);
   const [cooked, setCooked] = useState(false);
-  const [showReview, setShowReview] = useState(false);
-  const [rating, setRating] = useState(0);
-  const [reviewNote, setReviewNote] = useState('');
+  const [cookedBannerVisible, setCookedBannerVisible] = useState(false);
   const [imageError, setImageError] = useState(false);
+
+  // Auto-dismiss the cooked banner after 10 s so it doesn't linger forever
+  useEffect(() => {
+    if (!cookedBannerVisible) return;
+    const timerId = setTimeout(() => setCookedBannerVisible(false), 10000);
+    return () => clearTimeout(timerId);
+  }, [cookedBannerVisible]);
 
   // LLM substitution results: maps ingredient name → {have, substitution}
   const [llmSubs, setLlmSubs] = useState(null);
@@ -344,8 +349,10 @@ export default function RecipeDetailScreen() {
   const handleCookThis = async () => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setCooked(true);
+    setCookedBannerVisible(true);
     if (user?.id) await addEntry(id, session.mealType, servings, session.sessionPoolId);
-    setTimeout(() => setShowReview(true), 500);
+    // No immediate review prompt — people don't cook that fast.
+    // The History tab lets them rate and add notes whenever they're ready.
   };
 
   const handleSaveToggle = async () => {
@@ -356,17 +363,6 @@ export default function RecipeDetailScreen() {
     } else {
       await save(id, session.sessionPoolId);
     }
-  };
-
-  const handleSubmitReview = async () => {
-    if (user?.id && rating > 0) {
-      await trackEvent({
-        userId: user.id, sessionId: session.sessionPoolId, recipeId: id,
-        eventType: 'recipe_reviewed', metadata: { rating, note: reviewNote },
-      }).catch(() => {});
-    }
-    setShowReview(false);
-    router.back();
   };
 
   const saved = isSaved(id);
@@ -474,7 +470,7 @@ export default function RecipeDetailScreen() {
             className="absolute top-4 right-4 w-10 h-10 bg-white/90 rounded-full items-center justify-center"
             accessibilityLabel={saved ? 'Remove from saved' : 'Save recipe'}
           >
-            <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={20} color={saved ? '#2563EB' : '#1E293B'} />
+            <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={20} color={saved ? '#214130' : '#1E293B'} />
           </Pressable>
         </View>
 
@@ -494,7 +490,7 @@ export default function RecipeDetailScreen() {
           <View className="flex-row">
             {prepTime ? (
               <View className="flex-1 items-center py-3 border-r border-border">
-                <Ionicons name="time-outline" size={18} color="#2563EB" />
+                <Ionicons name="time-outline" size={18} color="#214130" />
                 <Text className="text-sm font-bold text-text-primary mt-1">{formatMinutes(prepTime)}</Text>
                 <Text className="text-xs text-text-muted">Prep</Text>
               </View>
@@ -508,7 +504,7 @@ export default function RecipeDetailScreen() {
             ) : null}
             {!prepTime && !cookTime ? (
               <View className="flex-1 items-center py-3 border-r border-border">
-                <Ionicons name="time-outline" size={18} color="#2563EB" />
+                <Ionicons name="time-outline" size={18} color="#214130" />
                 <Text className="text-sm font-bold text-text-primary mt-1">{formatMinutes(totalTime)}</Text>
                 <Text className="text-xs text-text-muted">Total</Text>
               </View>
@@ -580,7 +576,7 @@ export default function RecipeDetailScreen() {
                     {/* Status icon */}
                     <View className="w-6 items-center mr-2 flex-shrink-0">
                       {haveIt ? (
-                        <Ionicons name="checkmark-circle" size={18} color="#16A34A" />
+                        <Ionicons name="checkmark-circle" size={18} color="#214130" />
                       ) : substitution ? (
                         <Ionicons name="swap-horizontal" size={18} color="#D97706" />
                       ) : (
@@ -640,9 +636,9 @@ export default function RecipeDetailScreen() {
             {(recipe.instructions || []).length} steps
           </Text>
           {servings && recipe.servings && servings !== recipe.servings ? (
-            <View className="flex-row items-center gap-1 mb-3 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-              <Ionicons name="information-circle-outline" size={14} color="#2563EB" />
-              <Text className="text-xs text-blue-700">
+            <View className="flex-row items-center gap-1 mb-3 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+              <Ionicons name="information-circle-outline" size={14} color="#214130" />
+              <Text className="text-xs text-green-700">
                 Quantities in steps are written for {recipe.servings} servings — you scaled to {servings}.
                 Adjust measurements proportionally ({servings > recipe.servings ? '×' : '÷'}{Math.abs(Math.round((servings / recipe.servings) * 10) / 10)})
               </Text>
@@ -670,7 +666,7 @@ export default function RecipeDetailScreen() {
                     <Text className="text-sm text-text-primary leading-6">
                       {segments.map((seg, j) =>
                         seg.type === 'highlight' ? (
-                          <Text key={j} className="font-bold text-primary bg-blue-50 rounded">
+                          <Text key={j} className="font-bold text-primary bg-green-50 rounded">
                             {seg.value}
                           </Text>
                         ) : (
@@ -706,12 +702,26 @@ export default function RecipeDetailScreen() {
 
       {/* Action buttons */}
       <View className="px-6 pb-6 gap-3 border-t border-border pt-4 bg-background">
-        {cooked ? (
-          <View className="py-4 rounded-xl bg-green-50 border border-green-200 items-center flex-row justify-center gap-2">
-            <Ionicons name="checkmark-circle" size={20} color="#16A34A" />
-            <Text className="text-green-700 font-semibold">Added to your history!</Text>
+        {cooked && cookedBannerVisible ? (
+          <View className="rounded-xl bg-green-50 border border-green-200 px-4 py-3">
+            <View className="flex-row items-center justify-between">
+              <View className="flex-row items-center gap-2 flex-1">
+                <Ionicons name="checkmark-circle" size={20} color="#214130" />
+                <Text className="text-green-700 font-semibold">Added to cooking history!</Text>
+              </View>
+              <Pressable
+                onPress={() => setCookedBannerVisible(false)}
+                hitSlop={12}
+                accessibilityLabel="Dismiss"
+              >
+                <Ionicons name="close" size={18} color="#214130" />
+              </Pressable>
+            </View>
+            <Text className="text-xs text-green-600 ml-7 mt-1">
+              Head to the History tab whenever you're done to rate it and add notes.
+            </Text>
           </View>
-        ) : (
+        ) : cooked ? null : (
           <Pressable
             onPress={handleCookThis}
             className="bg-primary py-4 rounded-xl items-center flex-row justify-center gap-2 active:opacity-90"
@@ -724,44 +734,15 @@ export default function RecipeDetailScreen() {
         <Pressable
           onPress={handleSaveToggle}
           className={'py-4 rounded-xl items-center border flex-row justify-center gap-2 active:bg-gray-50 '
-            + (saved ? 'border-primary bg-blue-50' : 'border-border bg-surface')}
+            + (saved ? 'border-primary bg-green-50' : 'border-border bg-surface')}
           accessibilityRole="button"
         >
-          <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={18} color={saved ? '#2563EB' : '#64748B'} />
+          <Ionicons name={saved ? 'bookmark' : 'bookmark-outline'} size={18} color={saved ? '#214130' : '#64748B'} />
           <Text className={'text-base font-semibold ' + (saved ? 'text-primary' : 'text-text-primary')}>
             {saved ? 'Saved' : 'Save for Later'}
           </Text>
         </Pressable>
       </View>
-
-      {/* Post-cook review modal */}
-      <Modal visible={showReview} transparent animationType="fade" onRequestClose={() => setShowReview(false)}>
-        <View className="flex-1 bg-black/50 justify-end">
-          <View className="bg-background rounded-t-3xl p-6">
-            <Text className="text-xl font-bold text-text-primary mb-1">How did it go?</Text>
-            <Text className="text-sm text-text-secondary mb-4">Rate this recipe to improve future recommendations.</Text>
-            <View className="flex-row justify-center gap-3 mb-4">
-              {[1, 2, 3, 4, 5].map((star) => (
-                <Pressable key={star} onPress={() => setRating(star)} accessibilityLabel={star + ' stars'}>
-                  <Ionicons name={star <= rating ? 'star' : 'star-outline'} size={36} color={star <= rating ? '#F59E0B' : '#CBD5E1'} />
-                </Pressable>
-              ))}
-            </View>
-            <TextInput
-              value={reviewNote}
-              onChangeText={setReviewNote}
-              placeholder="Optional note (e.g. too salty, kids loved it)"
-              placeholderTextColor="#94A3B8"
-              className="border border-border rounded-xl px-4 py-3 text-sm text-text-primary mb-4 bg-surface"
-              multiline
-              maxLength={200}
-            />
-            <Pressable onPress={handleSubmitReview} className="bg-primary py-4 rounded-xl items-center">
-              <Text className="text-white font-semibold">{rating > 0 ? 'Submit Rating' : 'Skip'}</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }

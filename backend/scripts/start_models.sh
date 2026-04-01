@@ -9,8 +9,8 @@
 # What it does:
 #   1. Checks if Ollama is installed (tells you to run setup_ollama.sh if not).
 #   2. Starts the Ollama server if it's not already running.
-#   3. Pulls qwen3-vl:4b (VLM) and qwen3:4b (LLM) if missing.
-#   4. Warms up both models with a tiny prompt so first real request is fast.
+#   3. Pulls qwen3.5:4b if missing.
+#   4. Warms up the model with a tiny prompt so first real request is fast.
 #   5. Prints status and a ready message.
 # =============================================================================
 
@@ -22,8 +22,8 @@ warn()  { echo -e "\033[0;33m[WARN]\033[0m  $*"; }
 die()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-VLM_MODEL="${VLM_MODEL:-qwen3-vl:4b}"
-LLM_MODEL="${LLM_MODEL:-qwen3:4b}"
+VLM_MODEL="${VLM_MODEL:-qwen3.5:4b}"
+LLM_MODEL="${LLM_MODEL:-qwen3.5:4b}"
 
 # ---- 1. Check Ollama installed ----
 if ! command -v ollama &>/dev/null; then

@@ -491,6 +491,7 @@ async def _call_llm(
         temperature=0.7,
         timeout=LLM_TIMEOUT_SECONDS,
         think=False,
+        priority="normal",
     )
 
     logger.info("LLM raw response (first 800 chars):\n%s", raw_text[:800])
@@ -694,6 +695,7 @@ async def suggest_substitutions(
             temperature=0.3,
             timeout=float(LLM_TIMEOUT_SECONDS),
             think=False,
+            priority="high",
         )
         cleaned_json = _extract_json(raw_response_text)
         results = json.loads(cleaned_json)

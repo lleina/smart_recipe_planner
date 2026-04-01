@@ -81,9 +81,20 @@ export function SavedRecipesProvider({ children }) {
    */
   const saveRecipeToCollection = useCallback(async (recipeId, sessionId) => {
     if (!user?.id) return;
+    // Prevent duplicate saves
+    if (savedRecipeIdSet.has(recipeId)) return;
+
+    // Optimistic: insert a temporary entry so the UI updates instantly.
+    const tempId = `__temp_${recipeId}_${Date.now()}`;
+    const optimisticEntry = { id: tempId, recipeId, userId: user.id, savedAt: new Date().toISOString() };
+    setSavedRecipes((previousEntries) => [optimisticEntry, ...previousEntries]);
+
     try {
       const newSavedEntry = await saveRecipe(user.id, recipeId);
-      setSavedRecipes((previousEntries) => [newSavedEntry, ...previousEntries]);
+      // Replace the temporary entry with the real server-returned entry.
+      setSavedRecipes((previousEntries) =>
+        previousEntries.map((entry) => (entry.id === tempId ? newSavedEntry : entry))
+      );
       trackEvent({
         userId: user.id,
         sessionId,
@@ -91,9 +102,13 @@ export function SavedRecipesProvider({ children }) {
         eventType: 'recipe_saved',
       }).catch(() => {}); // Fire-and-forget; analytics must not affect UX.
     } catch (saveError) {
+      // Rollback the optimistic entry on failure.
+      setSavedRecipes((previousEntries) =>
+        previousEntries.filter((entry) => entry.id !== tempId)
+      );
       setError(saveError.message || 'Failed to save recipe');
     }
-  }, [user?.id]);
+  }, [user?.id, savedRecipeIdSet]);
 
   /**
    * Remove a saved recipe from the user's collection.
@@ -103,12 +118,20 @@ export function SavedRecipesProvider({ children }) {
    * @param {string} savedEntryId - The ``SavedRecipe.id`` (primary key) to remove.
    */
   const removeRecipeFromCollection = useCallback(async (savedEntryId) => {
+    // Optimistic: remove from local state immediately so the UI updates instantly.
+    let removedEntry = null;
+    setSavedRecipes((previousEntries) => {
+      removedEntry = previousEntries.find((entry) => entry.id === savedEntryId);
+      return previousEntries.filter((entry) => entry.id !== savedEntryId);
+    });
+
     try {
       await unsaveRecipe(savedEntryId);
-      setSavedRecipes((previousEntries) =>
-        previousEntries.filter((entry) => entry.id !== savedEntryId)
-      );
     } catch (removeError) {
+      // Rollback: re-insert the removed entry on failure.
+      if (removedEntry) {
+        setSavedRecipes((previousEntries) => [removedEntry, ...previousEntries]);
+      }
       setError(removeError.message || 'Failed to remove saved recipe');
     }
   }, []);

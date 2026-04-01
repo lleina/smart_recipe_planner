@@ -6,9 +6,17 @@
  *
  * Substitutions are pre-fetched as each card is rendered so recipe detail
  * reads from cache with zero LLM wait.
+ *
+ * UX notes:
+ *   - Clicking "Next" never replaces the visible page with a full-screen
+ *     loader. The current page stays visible while the next batch loads,
+ *     with a phase progress banner shown at the top.
+ *   - The list auto-scrolls to the top whenever the page advances.
+ *   - Phase labels ("Brainstorming…", "Searching…", "Ranking…") give the
+ *     user a sense of what the system is doing without exposing internals.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, Pressable, ActivityIndicator, FlatList, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -21,6 +29,17 @@ import RecipeCard from '../../src/components/common/RecipeCard';
 import { RECIPE_BATCH_SIZE } from '../../src/constants/config';
 
 const FATIGUE_THRESHOLD = 7;
+
+/**
+ * Phase labels shown in the progress banner while the next page is loading.
+ * They cycle every 1.5 s to convey meaningful progression rather than a
+ * generic spinner — mirrors the actual backend pipeline stages.
+ */
+const DISCOVERY_PHASES = [
+  'Brainstorming ideas for your next page…',
+  'Searching for matching recipes…',
+  'Ranking by what you have on hand…',
+];
 
 export default function DiscoverScreen() {
   const router = useRouter();
@@ -47,6 +66,31 @@ export default function DiscoverScreen() {
 
   const [refreshCount, setRefreshCount] = useState(0);
   const [showFatiguePrompt, setShowFatiguePrompt] = useState(false);
+
+  // Ref for programmatic scroll-to-top on page advance
+  const flatListRef = useRef(null);
+
+  // Cycling phase index — only advances while nextPagePending is true
+  const [phaseIndex, setPhaseIndex] = useState(0);
+
+  useEffect(() => {
+    if (!nextPagePending) {
+      setPhaseIndex(0);
+      return;
+    }
+    const intervalId = setInterval(() => {
+      setPhaseIndex((prev) => (prev + 1) % DISCOVERY_PHASES.length);
+    }, 1500);
+    return () => clearInterval(intervalId);
+  }, [nextPagePending]);
+
+  // Scroll to top whenever the visible page changes (covers both instant
+  // and delayed advances).
+  useEffect(() => {
+    if (currentPage > 0) {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }
+  }, [currentPage]);
 
   // ── Handlers ────────────────────────────────────────────────────────────
 
@@ -93,22 +137,18 @@ export default function DiscoverScreen() {
 
   const hasActiveSession = session.sessionPoolId != null || recipes.length > 0 || loading;
 
-  // Determine whether to show REAL cards or a full-page loading indicator.
-  // NEVER show skeleton cards — the user either sees 5 real cards or a loading page.
-  const isPageLoading = useMemo(() => {
-    // Initial load: no recipes at all yet
-    if (loading && recipes.length === 0) return true;
-    // Waiting for the next page to fill
-    if (nextPagePending) return true;
-    // Current page doesn't have a full set of RECIPE_BATCH_SIZE cards and data is still arriving
-    if (currentPageRecipes.length < RECIPE_BATCH_SIZE && (isBuffering || poolInfo.poolSize > recipes.length)) return true;
-    return false;
-  }, [loading, recipes.length, nextPagePending, currentPageRecipes, isBuffering, poolInfo.poolSize]);
+  // Only show the full-page loader on the very first load when no recipes
+  // exist yet. Once the user has seen at least one page, keep showing it
+  // while the next page loads — a phase banner handles that state instead.
+  const isInitialLoading = (loading && recipes.length === 0) ||
+    (currentPageRecipes.length < RECIPE_BATCH_SIZE &&
+      recipes.length === 0 &&
+      (isBuffering || poolInfo.poolSize > 0));
 
   const listData = useMemo(() => {
-    if (isPageLoading) return [];  // empty — full-page loader shown instead
+    if (isInitialLoading) return [];
     return currentPageRecipes;
-  }, [isPageLoading, currentPageRecipes]);
+  }, [isInitialLoading, currentPageRecipes]);
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -122,6 +162,25 @@ export default function DiscoverScreen() {
       />
     );
   }, [isSaved, handlePress, handleSave]);
+
+  // ── Phase progress banner ────────────────────────────────────────────────
+
+  /**
+   * Shown at the top of the list while the next page is buffering.
+   * Keeps the current page fully visible so the user has something to look at.
+   */
+  const NextPageBanner = useMemo(() => {
+    if (!nextPagePending) return null;
+    return (
+      <View className="mb-4 px-4 py-3 bg-green-50 border border-green-100 rounded-2xl flex-row items-center gap-3">
+        <ActivityIndicator size="small" color="#214130" />
+        <View className="flex-1">
+          <Text className="text-xs font-semibold text-primary">Loading your next page</Text>
+          <Text className="text-xs text-green-600 mt-0.5">{DISCOVERY_PHASES[phaseIndex]}</Text>
+        </View>
+      </View>
+    );
+  }, [nextPagePending, phaseIndex]);
 
   // ── Pagination controls ─────────────────────────────────────────────────
 
@@ -157,7 +216,7 @@ export default function DiscoverScreen() {
             accessibilityRole="button"
             accessibilityLabel="Previous page"
           >
-            <Ionicons name="chevron-back" size={18} color={hasPrevPage ? '#2563EB' : '#94A3B8'} />
+            <Ionicons name="chevron-back" size={18} color={hasPrevPage ? '#214130' : '#94A3B8'} />
             <Text className={'text-sm font-semibold ' + (hasPrevPage ? 'text-primary' : 'text-text-muted')}>
               Prev
             </Text>
@@ -179,7 +238,7 @@ export default function DiscoverScreen() {
               (hasNextPage && !isLoadingNext
                 ? 'bg-primary active:opacity-80'
                 : isLoadingNext
-                  ? 'bg-blue-100 border border-blue-200'
+                  ? 'bg-green-100 border border-green-200'
                   : 'opacity-30 bg-surface border border-border')
             }
             accessibilityRole="button"
@@ -187,7 +246,7 @@ export default function DiscoverScreen() {
           >
             {isLoadingNext ? (
               <>
-                <ActivityIndicator size="small" color="#2563EB" />
+                <ActivityIndicator size="small" color="#214130" />
                 <Text className="text-sm font-semibold text-primary ml-1">Loading…</Text>
               </>
             ) : (
@@ -210,40 +269,53 @@ export default function DiscoverScreen() {
     handleNextPage, handlePrevPage,
   ]);
 
-  return (
-    <SafeAreaView className="flex-1 bg-background">
-      <View className="px-6 pt-4 pb-2 flex-row items-center justify-between">
-        <Text className="text-2xl font-bold text-text-primary">Discover</Text>
-        <View className="flex-row items-center gap-3">
-          {hasActiveSession ? (
-            <Pressable
-              onPress={handleStartSession}
-              className="flex-row items-center gap-1 px-3 py-1.5 rounded-full border border-border"
-              accessibilityLabel="Start new session"
-            >
-              <Ionicons name="refresh-outline" size={14} color="#64748B" />
-              <Text className="text-xs font-medium text-text-secondary">New</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      </View>
+  // Full green background when no active session (home/empty state).
+  const isEmptyState = !hasActiveSession && !loading;
 
-      {!hasActiveSession && !loading ? (
+  return (
+    <SafeAreaView
+      className="flex-1"
+      style={{ backgroundColor: isEmptyState ? '#214130' : '#FAFAFA' }}
+    >
+      {/* Header — hidden during the empty state so the green fills edge-to-edge */}
+      {!isEmptyState && (
+        <View className="px-6 pt-4 pb-2 flex-row items-center justify-between">
+          <Text className="text-2xl font-bold text-text-primary">Discover</Text>
+          <View className="flex-row items-center gap-3">
+            {hasActiveSession ? (
+              <Pressable
+                onPress={handleStartSession}
+                className="flex-row items-center gap-1 px-3 py-1.5 rounded-full border border-border"
+                accessibilityLabel="Start new session"
+              >
+                <Ionicons name="refresh-outline" size={14} color="#64748B" />
+                <Text className="text-xs font-medium text-text-secondary">New</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      {isEmptyState ? (
         <EmptyState onStart={handleStartSession} />
-      ) : isPageLoading && hasActiveSession ? (
+      ) : isInitialLoading && hasActiveSession ? (
         <View className="flex-1 items-center justify-center">
-          <ActivityIndicator size="large" color="#2563EB" />
+          <ActivityIndicator size="large" color="#214130" />
           <Text className="text-sm text-text-secondary mt-3 font-medium">
             Finding great recipes for you…
           </Text>
         </View>
       ) : (
         <FlatList
+          ref={flatListRef}
           data={listData}
+          extraData={savedRecipes}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           ListHeaderComponent={
             <>
+              {/* Phase banner: visible while next page is loading */}
+              {NextPageBanner}
               {llmWarning ? (
                 <View className="mb-2 py-3 bg-amber-50 border border-amber-200 rounded-xl flex-row items-center gap-2 px-4">
                   <Ionicons name="information-circle-outline" size={16} color="#D97706" />
@@ -257,8 +329,8 @@ export default function DiscoverScreen() {
                 </View>
               ) : null}
               {session.sessionPoolId ? (
-                <View className="flex-row items-center gap-2 mb-4 py-2 px-3 bg-blue-50 rounded-xl">
-                  <Ionicons name="restaurant-outline" size={14} color="#2563EB" />
+                <View className="flex-row items-center gap-2 mb-4 py-2 px-3 bg-green-50 rounded-xl">
+                  <Ionicons name="restaurant-outline" size={14} color="#214130" />
                   <Text className="text-xs font-medium text-primary capitalize">
                     {session.mealType} · {session.servingCount} serving{session.servingCount !== 1 ? 's' : ''}
                     {session.occasion ? ' · ' + session.occasion : ''}
@@ -281,30 +353,63 @@ export default function DiscoverScreen() {
 }
 
 /**
- * Prompt shown when no active session exists yet.
+ * Full-screen dark-green home state shown when no active session exists yet.
+ * Bold Mohave display font headline, white CTA — no icon, pure typography.
+ *
+ * Layout: spacer fills the top ~45% so content naturally sits in the lower
+ * half; this guarantees the button is always visible regardless of device height.
+ *
  * @param {object} props
- * @param {function} props.onStart - Called when the user taps "Start Cooking Session".
+ * @param {function} props.onStart - Called when the user taps "Find Me Now".
  */
 function EmptyState({ onStart }) {
   return (
-    <View className="flex-1 items-center justify-center px-8">
-      <View className="w-24 h-24 rounded-full bg-blue-50 items-center justify-center mb-6">
-        <Ionicons name="restaurant-outline" size={48} color="#2563EB" />
-      </View>
-      <Text className="text-2xl font-bold text-text-primary mb-3 text-center">
-        What are you cooking today?
+    <ScrollView
+      contentContainerStyle={{
+        flexGrow: 1,
+        justifyContent: 'flex-end',
+        paddingHorizontal: 32,
+        paddingBottom: 52,
+      }}
+      scrollEnabled={false}
+      keyboardShouldPersistTaps="handled"
+    >
+      <Text
+        style={{
+          fontFamily: 'Mohave_700Bold',
+          fontSize: 50,
+          color: '#FFFFFF',
+          lineHeight: 56,
+          letterSpacing: -1,
+          marginBottom: 36,
+        }}
+        accessibilityRole="header"
+      >
+        The internet has millions of recipes.{'\n'}You only need one.{'\n'}We'll find it.
       </Text>
-      <Text className="text-base text-text-secondary text-center mb-8 leading-6">
-        Tell us what ingredients you have and we will find perfect recipes in seconds.
-      </Text>
+
       <Pressable
         onPress={onStart}
-        className="bg-primary py-4 px-8 rounded-xl w-full items-center active:opacity-90"
+        style={{
+          backgroundColor: '#FFFFFF',
+          paddingVertical: 18,
+          borderRadius: 16,
+          alignItems: 'center',
+        }}
         accessibilityRole="button"
-        accessibilityLabel="Start cooking session"
+        accessibilityLabel="Find me a recipe now"
       >
-        <Text className="text-white text-base font-semibold">Start Cooking Session</Text>
+        <Text
+          style={{
+            fontFamily: 'Mohave_700Bold',
+            color: '#214130',
+            fontSize: 18,
+            letterSpacing: 0.3,
+          }}
+        >
+          Find Me Now
+        </Text>
       </Pressable>
-    </View>
+    </ScrollView>
   );
 }

@@ -26,8 +26,58 @@ Supported backends:
     TGI:      ``base_url="http://localhost:8080/v1"``,  ``api_key="EMPTY"``
 """
 
+import asyncio
+import heapq
+import itertools
+from dataclasses import dataclass, field
+from typing import Literal
+
 import httpx
 from openai import AsyncOpenAI
+
+
+@dataclass(order=True)
+class _QueuedOllamaCall:
+    """Internal priority-queue item for serialized Ollama scheduling."""
+
+    priority: int
+    sequence: int
+    token: object = field(compare=False)
+
+
+_ollama_queue_condition = asyncio.Condition()
+_ollama_queue: list[_QueuedOllamaCall] = []
+_ollama_sequence = itertools.count()
+_ollama_call_active = False
+
+
+async def _acquire_ollama_turn(priority: Literal["high", "normal"]) -> None:
+    """Block until this call reaches the front of the priority queue."""
+    queue_priority = 0 if priority == "high" else 1
+    request = _QueuedOllamaCall(
+        priority=queue_priority,
+        sequence=next(_ollama_sequence),
+        token=object(),
+    )
+
+    global _ollama_call_active
+    async with _ollama_queue_condition:
+        heapq.heappush(_ollama_queue, request)
+        while True:
+            is_next = bool(_ollama_queue) and (_ollama_queue[0].token is request.token)
+            if is_next and not _ollama_call_active:
+                heapq.heappop(_ollama_queue)
+                _ollama_call_active = True
+                return
+            await _ollama_queue_condition.wait()
+
+
+async def _release_ollama_turn() -> None:
+    """Release the active Ollama slot and wake queued callers."""
+    global _ollama_call_active
+    async with _ollama_queue_condition:
+        _ollama_call_active = False
+        _ollama_queue_condition.notify_all()
 
 
 def get_client(base_url: str, api_key: str = "local") -> AsyncOpenAI:
@@ -55,6 +105,7 @@ async def ollama_chat(
     temperature: float = 0.7,
     timeout: float = 120.0,
     think: bool = False,
+    priority: Literal["high", "normal"] = "normal",
 ) -> str:
     """Call Ollama's native ``/api/chat`` endpoint and return the response text.
 
@@ -74,6 +125,8 @@ async def ollama_chat(
         timeout: HTTP request timeout in seconds.
         think: Whether to enable chain-of-thought reasoning. ``False``
             suppresses thinking and populates ``content`` immediately.
+        priority: Scheduler priority for local contention. ``"high"`` jumps
+            ahead of queued ``"normal"`` calls.
 
     Returns:
         The assistant's response content string.
@@ -99,12 +152,16 @@ async def ollama_chat(
         },
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as http_client:
-        response = await http_client.post(
-            f"{ollama_root}/api/chat", json=request_payload
-        )
-        response.raise_for_status()
-        response_data = response.json()
+    await _acquire_ollama_turn(priority)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            response = await http_client.post(
+                f"{ollama_root}/api/chat", json=request_payload
+            )
+            response.raise_for_status()
+            response_data = response.json()
+    finally:
+        await _release_ollama_turn()
 
     assistant_content: str = response_data.get("message", {}).get("content", "") or ""
     if not assistant_content.strip():

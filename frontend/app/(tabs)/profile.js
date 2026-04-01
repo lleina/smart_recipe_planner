@@ -291,7 +291,7 @@ export default function ProfileScreen() {
           <Text className="text-2xl font-bold text-text-primary">Profile</Text>
         </View>
         <View className="flex-1 items-center justify-center">
-          <ActivityIndicator color="#2563EB" />
+          <ActivityIndicator color="#214130" />
         </View>
       </SafeAreaView>
     );
@@ -356,19 +356,6 @@ export default function ProfileScreen() {
           summary={equipmentSummary}
           onPress={() => openModal('cookingEquipment', preferences.cookingEquipment || [])}
         />
-
-        {/* Account section */}
-        <Text className="text-xs font-semibold text-text-muted uppercase tracking-wide mt-6 mb-1">
-          Account
-        </Text>
-
-        <Pressable
-          onPress={logout}
-          className="flex-row items-center py-4 border-b border-border active:bg-gray-50"
-        >
-          <Ionicons name="log-out-outline" size={22} color="#EF4444" />
-          <Text className="ml-4 text-base text-danger">Log Out</Text>
-        </Pressable>
 
         {/* Dev Mode */}
         <View className="mt-8 pt-4 border-t border-border">
@@ -512,7 +499,7 @@ export default function ProfileScreen() {
       {saving ? (
         <View className="absolute inset-0 bg-black/20 items-center justify-center">
           <View className="bg-background rounded-2xl px-6 py-4 flex-row items-center gap-3">
-            <ActivityIndicator color="#2563EB" />
+            <ActivityIndicator color="#214130" />
             <Text className="text-sm font-medium text-text-primary">Saving...</Text>
           </View>
         </View>
