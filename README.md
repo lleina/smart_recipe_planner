@@ -4,14 +4,17 @@ A smart recipe planning mobile app (Expo, iOS + Android) that eliminates cooking
 
 ## Quick Start
 
-**Already set up?** Run everything at once:
-```bash
-cd ~/recipe_generator
-./start_all.sh
-```
-To stop all servers: `./stop_all.sh`
+**Already set up?** Pick the command for your environment:
 
-For detailed server management (troubleshooting, background processes, etc.), see [SERVER_MANAGEMENT.md](./SERVER_MANAGEMENT.md).
+```bash
+# Native Linux or macOS
+./start_all.sh
+
+# WSL2 (starts cloudflared API tunnel + expo --tunnel so your phone can connect)
+./start_all.sh --wsl2
+```
+
+To stop everything: `./stop_all.sh` (add `--keep-ollama` to keep models loaded)
 
 ---
 
@@ -19,7 +22,7 @@ For detailed server management (troubleshooting, background processes, etc.), se
 
 - **Frontend**: Expo SDK 54 (React Native) with Expo Router, NativeWind v4
 - **Backend**: Python 3.12+ (FastAPI)
-- **AI Models**: Qwen3 4B (text) + Qwen3-VL 4B (vision) via [Ollama](https://ollama.com)
+- **AI Models**: Qwen3.5 4B (multimodal text + vision) via [Ollama](https://ollama.com)
 - **State Management**: React hooks + Context API
 - **Testing**: Jest (frontend), pytest (backend)
 
@@ -61,8 +64,7 @@ bash backend/scripts/setup_ollama.sh
 
 **What it does:**
 - Installs Ollama (if not present)
-- Pulls `qwen3:4b` — text model for recipe ideation + ranking
-- Pulls `qwen3-vl:4b` — vision model for ingredient recognition from photos
+- Pulls `qwen3.5:4b` — multimodal model for recipe ideation, ranking, and ingredient recognition
 - Creates `backend/.env` from `.env.example`
 
 > **No GPU?** Both models run on CPU (slower but functional). An NVIDIA GPU with 4+ GB VRAM is recommended.
@@ -75,22 +77,18 @@ bash backend/scripts/start_models.sh
 
 This starts the Ollama server and warms up both models. Leave it running.
 
-### 4. Start the backend
+### 4. Start everything
 
 ```bash
-cd backend
-source venv/bin/activate
-uvicorn app.main:app --reload --port 8000
+./start_all.sh          # native Linux / macOS
+./start_all.sh --wsl2   # WSL2: also starts the API tunnel + expo --tunnel
 ```
 
-### 5. Start the frontend
+`--wsl2` mode:
+- Runs `backend/scripts/start_api_tunnel.sh` (downloads `cloudflared` if needed, starts a Cloudflare tunnel, writes the public URL to `frontend/.env`)
+- Passes `--tunnel` to Expo so your phone can reach the Metro bundler
 
-```bash
-cd frontend
-npx expo start --tunnel    # use --tunnel for WSL2
-```
-
-Scan the QR code with Expo Go (Android) or Camera app (iOS).
+Scan the QR code with Expo Go (Android) or the Camera app (iOS).
 
 ### Running Tests
 
@@ -99,7 +97,7 @@ Scan the QR code with Expo Go (Android) or Camera app (iOS).
 cd frontend && npm test
 ```
 
-**Backend** (requires backend + Ollama running via `./start_all.sh`):
+**Backend** (requires the backend running per step 4 above):
 ```bash
 cd backend
 source venv/bin/activate
@@ -152,10 +150,10 @@ Key backend variables (see `backend/.env.example` for full docs):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint for vision model |
-| `VLM_MODEL` | `qwen3-vl:4b` | Vision model for ingredient photos |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint for text model |
-| `LLM_MODEL` | `qwen3:4b` | Text model for ideation + ranking |
+| `VLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint for vision/VLM calls |
+| `VLM_MODEL` | `qwen3.5:4b` | Model for ingredient photo recognition |
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint for text/LLM calls |
+| `LLM_MODEL` | `qwen3.5:4b` | Model for recipe ideation + ranking |
 | `RANKING_MODE` | `hybrid` | `hybrid` / `rules_only` / `llm_only` |
 
 > Set `VLM_BASE_URL` or `LLM_BASE_URL` to empty to skip AI calls and use mock/fallback data (useful for frontend-only development).

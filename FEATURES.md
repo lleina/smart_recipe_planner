@@ -42,7 +42,7 @@ Browse → Save favourites → Mark as cooked → History informs future session
 **Technology:**
 - Mobile app: Expo (React Native) — iOS and Android
 - Backend API: Python 3.12+ / FastAPI
-- AI models: Qwen3 4B (text ideation + re-ranking) and Qwen3-VL 4B (vision) via Ollama
+- AI models: Qwen3.5 4B (multimodal text + vision) via Ollama
 - Database: SQLite (default) or PostgreSQL (production)
 
 ---
@@ -91,7 +91,7 @@ list of identified ingredients.
 2. The app opens the device image picker (camera or gallery).
 3. The image is compressed to ≤ 1 MB before upload (preserving aspect ratio).
 4. The compressed image is POSTed to `POST /api/vlm` as a multipart upload.
-5. The backend passes the image to Qwen3-VL 4B via Ollama.
+5. The backend passes the image to Qwen3.5 4B via Ollama.
 6. The model returns a JSON list of detected ingredients.
 7. Each ingredient is annotated with:
    - **name**: plain culinary name (brand names stripped)
@@ -456,10 +456,10 @@ All errors use a consistent JSON shape (see `ErrorResponse` schema):
 | `ACCESS_TOKEN_EXPIRE_DAYS` | `1` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `30` | Refresh token lifetime |
 | `VLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint for the vision model |
-| `VLM_MODEL` | `qwen3-vl:4b` | Vision model identifier |
+| `VLM_MODEL` | `qwen3.5:4b` | Vision model identifier |
 | `VLM_TIMEOUT_SECONDS` | `120` | Maximum seconds to wait for a VLM response |
 | `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint for the text model |
-| `LLM_MODEL` | `qwen3:4b` | Text model identifier |
+| `LLM_MODEL` | `qwen3.5:4b` | Text model identifier |
 | `LLM_TIMEOUT_SECONDS` | `90` | Maximum seconds to wait for an LLM response |
 | `LLM_API_KEY` | `ollama` | API key (use `ollama` for local Ollama) |
 | `RANKING_MODE` | `hybrid` | `hybrid` / `rules_only` / `llm_only` |
