@@ -51,12 +51,22 @@ export const identifyIngredients = async (images) => {
       signal: controller.signal,
     });
 
+    const responseData = await response.json().catch(() => null);
+
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || errorData.error || `VLM request failed (${response.status})`);
+      throw new Error(
+        responseData?.error?.message ||
+        responseData?.detail ||
+        responseData?.error ||
+        `VLM request failed (${response.status})`,
+      );
     }
 
-    return await response.json();
+    if (!responseData) {
+      throw new Error('VLM returned an unreadable response. Please try again.');
+    }
+
+    return responseData;
   } catch (error) {
     if (error.name === 'AbortError') {
       throw new Error('VLM processing timed out. Please enter ingredients manually.');
