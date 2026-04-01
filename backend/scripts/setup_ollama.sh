@@ -8,20 +8,18 @@
 # What this script does:
 #   1. Installs Ollama (curl-based installer) if not already present.
 #   2. Starts the Ollama server in the background.
-#   3. Pulls qwen2-vl:7b  (VLM — ingredient recognition).
-#   4. Pulls qwen2.5:3b   (LLM — recipe ideation + re-ranking).
-#   5. Copies .env.example → .env if .env does not yet exist.
+#   3. Pulls qwen3.5:4b  (multimodal — recipe ideation, ranking, and ingredient recognition).
+#   4. Copies .env.example → .env if .env does not yet exist.
 #
 # Hardware notes (Ubuntu/WSL2):
-#   - qwen3-vl:4b  requires ~3 GB VRAM or ~5 GB RAM for CPU inference.
-#   - qwen3:4b     requires ~3 GB VRAM or ~5 GB RAM for CPU inference.
-#   - Both models run on CPU if no CUDA GPU is available (slower but functional).
-#   - If you have < 8 GB total RAM, swap to 2b variants.
+#   - qwen3.5:4b requires ~3 GB VRAM or ~5 GB RAM for CPU inference.
+#   - Runs on CPU if no CUDA GPU is available (slower but functional).
+#   - If you have < 6 GB total RAM, swap to the 1.5b variant.
 #
 # Model swap guide (edit .env after running this script):
-#   More VRAM / better quality : VLM_MODEL=qwen3-vl:8b   LLM_MODEL=qwen3:8b
-#   Default (balanced)         : VLM_MODEL=qwen3-vl:4b   LLM_MODEL=qwen3:4b
-#   CPU-only / low RAM         : VLM_MODEL=qwen3-vl:2b   LLM_MODEL=qwen3:1.7b
+#   More VRAM / better quality : MODEL=qwen3.5:8b
+#   Default (balanced)         : MODEL=qwen3.5:4b
+#   CPU-only / low RAM         : MODEL=qwen3.5:1.5b
 # =============================================================================
 
 set -euo pipefail
@@ -85,8 +83,7 @@ pull_if_missing() {
     fi
 }
 
-pull_if_missing "qwen3-vl:4b"
-pull_if_missing "qwen3:4b"
+pull_if_missing "qwen3.5:4b"
 
 # --------------------------------------------------------------------------- #
 # 4. Bootstrap .env from .env.example                                           #
@@ -114,8 +111,7 @@ fi
 echo ""
 ok "Setup complete!"
 echo ""
-echo "  VLM model : qwen3-vl:4b -> ingredient photo recognition"
-echo "  LLM model : qwen3:4b    → recipe ideation + re-ranking"
+echo "  Model    : qwen3.5:4b -> recipe ideation, ranking, ingredient recognition"
 echo "  Endpoint  : http://localhost:11434/v1  (Ollama)"
 echo ""
 echo "  To start the backend:"
